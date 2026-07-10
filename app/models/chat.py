@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, String, func
+from sqlalchemy import DateTime, Enum, ForeignKey, String, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -25,12 +25,12 @@ class Chat(Base):
     type: Mapped[ChatType] = mapped_column(
         Enum(ChatType, name="chat_type"), nullable=False, default=ChatType.personal
     )
+    created_by: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
-    )
 
-    members = relationship("User", secondary="chat_members", back_populates="chats")
+    participants = relationship("ChatParticipant", back_populates="chat")
     messages = relationship("Message", back_populates="chat")
