@@ -6,9 +6,7 @@ from pydantic import BaseModel
 
 class ChatMemberResponse(BaseModel):
     id: uuid.UUID
-    username: str
-
-    model_config = {"from_attributes": True}
+    login: str
 
 
 class ChatResponse(BaseModel):
@@ -24,7 +22,3 @@ class ChatResponse(BaseModel):
 class ChatCreateRequest(BaseModel):
     name: str | None = None
     member_ids: list[uuid.UUID]
-
-
-class ChatAddMemberRequest(BaseModel):
-    user_id: uuid.UUID

@@ -7,8 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.dependencies import get_current_user
 from app.db import get_db
 from app.messages.schemas import MessageCreateRequest, MessageResponse
-from app.models import chat_members
-from app.models.chat import Chat
+from app.models.chat_participant import ChatParticipant
 from app.models.message import Message
 from app.models.user import User
 
@@ -22,27 +21,19 @@ async def send_message(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    result = await db.execute(select(Chat).where(Chat.id == chat_id))
-    chat = result.scalar_one_or_none()
-    if not chat:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Chat not found",
-        )
-
     result = await db.execute(
-        select(chat_members).where(
-            chat_members.c.chat_id == chat_id,
-            chat_members.c.user_id == current_user.id,
+        select(ChatParticipant).where(
+            ChatParticipant.chat_id == chat_id,
+            ChatParticipant.user_id == current_user.id,
         )
     )
-    if not result.first():
+    if not result.scalar_one_or_none():
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You are not a member of this chat",
         )
 
-    message = Message(chat_id=chat_id, sender_id=current_user.id, text=body.text)
+    message = Message(chat_id=chat_id, user_id=current_user.id, content=body.content)
     db.add(message)
     await db.commit()
     await db.refresh(message)
@@ -75,7 +66,7 @@ async def search_messages(
     current_user: User = Depends(get_current_user),
     limit: int = Query(50, ge=1, le=200),
 ):
-    stmt = select(Message).where(Message.text.ilike(f"%{q}%"))
+    stmt = select(Message).where(Message.content.ilike(f"%{q}%"))
     if chat_id:
         stmt = stmt.where(Message.chat_id == chat_id)
     stmt = stmt.order_by(Message.created_at.desc()).limit(limit)
