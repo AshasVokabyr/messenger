@@ -10,7 +10,7 @@ class Settings(BaseSettings):
 
     JWT_SECRET_KEY: str = "change-me"
     JWT_ALGORITHM: str = "HS256"
-    JWT_EXPIRE_MINUTES: int = 60
+    JWT_EXPIRE_MINUTES: int = 1440
 
     LOG_LEVEL: str = "INFO"
     LOG_FORMAT: str = "json"
