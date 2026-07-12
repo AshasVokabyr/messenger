@@ -12,6 +12,8 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRE_MINUTES: int = 1440
 
+    DEBUG: bool = False
+
     LOG_LEVEL: str = "INFO"
     LOG_FORMAT: str = "json"
 

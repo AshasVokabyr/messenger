@@ -49,6 +49,18 @@ async def get_chat_messages(
     offset: int = Query(0, ge=0),
 ):
     result = await db.execute(
+        select(ChatParticipant).where(
+            ChatParticipant.chat_id == chat_id,
+            ChatParticipant.user_id == current_user.id,
+        )
+    )
+    if not result.scalar_one_or_none():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You are not a member of this chat",
+        )
+
+    result = await db.execute(
         select(Message)
         .where(Message.chat_id == chat_id)
         .order_by(Message.created_at.desc())
