@@ -29,4 +29,5 @@ class Message(Base):
 
     __table_args__ = (
         Index("ix_messages_chat_created", "chat_id", created_at.desc()),
+        Index("ix_messages_chat_content", "chat_id", "content"),
     )
