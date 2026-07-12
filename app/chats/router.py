@@ -13,8 +13,10 @@ from app.chats.schemas import (
     ChatResponse,
 )
 from app.db import get_db
+from app.messages.schemas import MessageCreateRequest, MessageCursorResponse, MessageResponse
 from app.models.chat import Chat, ChatType
 from app.models.chat_participant import ChatParticipant, ParticipantRole
+from app.models.message import Message
 from app.models.user import User
 
 router = APIRouter(prefix="/chats", tags=["chats"])
@@ -282,3 +284,78 @@ async def remove_participant(
     await db.delete(target)
     await db.commit()
     return None
+
+
+@router.post("/{chat_id}/messages", response_model=MessageResponse, status_code=status.HTTP_201_CREATED)
+async def send_chat_message(
+    chat_id: uuid.UUID,
+    body: MessageCreateRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    result = await db.execute(
+        select(ChatParticipant).where(
+            ChatParticipant.chat_id == chat_id,
+            ChatParticipant.user_id == current_user.id,
+        )
+    )
+    if not result.scalar_one_or_none():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You are not a member of this chat",
+        )
+
+    message = Message(chat_id=chat_id, user_id=current_user.id, content=body.content)
+    db.add(message)
+    await db.commit()
+    await db.refresh(message)
+    return message
+
+
+@router.get("/{chat_id}/messages", response_model=MessageCursorResponse)
+async def get_chat_messages_cursor(
+    chat_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    before: uuid.UUID | None = Query(default=None),
+    limit: int = Query(50, ge=1, le=200),
+):
+    result = await db.execute(
+        select(ChatParticipant).where(
+            ChatParticipant.chat_id == chat_id,
+            ChatParticipant.user_id == current_user.id,
+        )
+    )
+    if not result.scalar_one_or_none():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You are not a member of this chat",
+        )
+
+    if before is not None:
+        cursor_result = await db.execute(
+            select(Message.created_at).where(Message.id == before)
+        )
+        cursor_created_at = cursor_result.scalar_one_or_none()
+        if cursor_created_at is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Cursor message not found",
+            )
+        stmt = (
+            select(Message)
+            .where(Message.chat_id == chat_id, Message.created_at < cursor_created_at)
+            .order_by(Message.created_at.desc())
+            .limit(limit)
+        )
+    else:
+        stmt = (
+            select(Message)
+            .where(Message.chat_id == chat_id)
+            .order_by(Message.created_at.desc())
+            .limit(limit)
+        )
+
+    messages = (await db.execute(stmt)).scalars().all()
+    next_cursor = str(messages[-1].id) if len(messages) == limit else None
+    return MessageCursorResponse(items=messages, next_cursor=next_cursor)
