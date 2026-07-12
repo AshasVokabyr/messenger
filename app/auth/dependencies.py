@@ -31,14 +31,14 @@ async def get_current_user(
     if user_id_str is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token payload",
+            detail="Missing user ID in token",
         )
     try:
         user_id = uuid.UUID(user_id_str)
     except ValueError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token payload",
+            detail="Malformed user ID in token",
         )
     result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()

@@ -1,5 +1,9 @@
+import uuid
+
 import pytest
 from httpx import AsyncClient
+
+from app.auth.utils import create_access_token
 
 
 class TestRegister:
@@ -118,15 +122,46 @@ class TestAuthDependency:
         assert response.json()["detail"] == "Invalid or expired token"
 
     @pytest.mark.asyncio
-    async def test_access_with_valid_token(self, client: AsyncClient):
-        register_response = await client.post(
-            "/auth/register",
-            json={"login": "testuser", "password": "secret123"},
-        )
-        token = register_response.json()["access_token"]
-
+    async def test_access_with_malformed_user_id_in_token(self, client: AsyncClient):
+        token = create_access_token("not-a-uuid")
         response = await client.get(
             "/chats/",
             headers={"Authorization": f"Bearer {token}"},
         )
+        assert response.status_code == 401
+        assert response.json()["detail"] == "Malformed user ID in token"
+
+    @pytest.mark.asyncio
+    async def test_access_with_valid_token_and_own_chats(self, client: AsyncClient):
+        reg1 = await client.post(
+            "/auth/register",
+            json={"login": "user1", "password": "secret123"},
+        )
+        token1 = reg1.json()["access_token"]
+
+        reg2 = await client.post(
+            "/auth/register",
+            json={"login": "user2", "password": "secret123"},
+        )
+        import jwt as pyjwt
+        user2_id = uuid.UUID(pyjwt.decode(
+            reg2.json()["access_token"],
+            options={"verify_signature": False},
+        )["sub"])
+
+        create_chat = await client.post(
+            "/chats/",
+            json={"name": "test-chat", "member_ids": [str(user2_id)]},
+            headers={"Authorization": f"Bearer {token1}"},
+        )
+        assert create_chat.status_code == 201
+        chat_id = create_chat.json()["id"]
+
+        response = await client.get(
+            "/chats/",
+            headers={"Authorization": f"Bearer {token1}"},
+        )
         assert response.status_code == 200
+        chats = response.json()
+        assert any(c["id"] == chat_id for c in chats)
+        assert any(c["name"] == "test-chat" for c in chats)
