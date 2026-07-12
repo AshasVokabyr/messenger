@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class ChatMemberResponse(BaseModel):
@@ -19,6 +19,6 @@ class ChatResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
-class ChatCreateRequest(BaseModel):
-    name: str | None = None
-    member_ids: list[uuid.UUID]
+class ChatCreateGroupRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    participant_ids: list[uuid.UUID]
