@@ -99,3 +99,34 @@ class TestLogin:
             json={"login": "nonexistent", "password": "secret123"},
         )
         assert response.status_code == 401
+
+
+class TestAuthDependency:
+    @pytest.mark.asyncio
+    async def test_access_without_token(self, client: AsyncClient):
+        response = await client.get("/chats/")
+        assert response.status_code == 401
+        assert response.json()["detail"] == "Not authenticated"
+
+    @pytest.mark.asyncio
+    async def test_access_with_invalid_token(self, client: AsyncClient):
+        response = await client.get(
+            "/chats/",
+            headers={"Authorization": "Bearer invalidtoken"},
+        )
+        assert response.status_code == 401
+        assert response.json()["detail"] == "Invalid or expired token"
+
+    @pytest.mark.asyncio
+    async def test_access_with_valid_token(self, client: AsyncClient):
+        register_response = await client.post(
+            "/auth/register",
+            json={"login": "testuser", "password": "secret123"},
+        )
+        token = register_response.json()["access_token"]
+
+        response = await client.get(
+            "/chats/",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert response.status_code == 200
