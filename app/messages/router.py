@@ -70,6 +70,40 @@ async def get_chat_messages(
     return result.scalars().all()
 
 
+@router.get("/{chat_id}/messages/search", response_model=list[MessageResponse])
+async def search_chat_messages(
+    chat_id: uuid.UUID,
+    q: str = Query(..., min_length=1),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    limit: int = Query(50, ge=1, le=200),
+):
+    result = await db.execute(
+        select(ChatParticipant).where(
+            ChatParticipant.chat_id == chat_id,
+            ChatParticipant.user_id == current_user.id,
+        )
+    )
+    if not result.scalar_one_or_none():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You are not a member of this chat",
+        )
+
+    safe_q = q.replace("%", "\\%").replace("_", "\\_")
+    stmt = (
+        select(Message)
+        .where(
+            Message.chat_id == chat_id,
+            Message.content.ilike(f"%{safe_q}%"),
+        )
+        .order_by(Message.created_at.desc())
+        .limit(limit)
+    )
+    result = await db.execute(stmt)
+    return result.scalars().all()
+
+
 @router.get("/search/", response_model=list[MessageResponse])
 async def search_messages(
     q: str = Query(..., min_length=1),
@@ -78,7 +112,8 @@ async def search_messages(
     current_user: User = Depends(get_current_user),
     limit: int = Query(50, ge=1, le=200),
 ):
-    stmt = select(Message).where(Message.content.ilike(f"%{q}%"))
+    safe_q = q.replace("%", "\\%").replace("_", "\\_")
+    stmt = select(Message).where(Message.content.ilike(f"%{safe_q}%"))
     if chat_id:
         stmt = stmt.where(Message.chat_id == chat_id)
     stmt = stmt.order_by(Message.created_at.desc()).limit(limit)
