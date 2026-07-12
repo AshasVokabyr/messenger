@@ -143,3 +143,174 @@ class TestCreateGroupChat:
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 404
+
+
+class TestParticipants:
+    async def _register(self, client: AsyncClient, login: str):
+        resp = await client.post(
+            "/auth/register",
+            json={"login": login, "password": "secret123"},
+        )
+        data = resp.json()
+        payload = decode_access_token(data["access_token"])
+        user_id = uuid.UUID(payload["sub"])
+        return data["access_token"], user_id
+
+    async def _create_group(self, client, token, participant_ids, name="Group"):
+        resp = await client.post(
+            "/chats/group",
+            json={"name": name, "participant_ids": participant_ids},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        return resp
+
+    @pytest.mark.asyncio
+    async def test_admin_adds_member(self, client: AsyncClient):
+        token1, user1_id = await self._register(client, "user_a")
+        _, user_b_id = await self._register(client, "user_b")
+        _, user_c_id = await self._register(client, "user_c")
+
+        chat = await self._create_group(client, token1, [str(user_b_id)])
+        chat_id = chat.json()["id"]
+
+        resp = await client.post(
+            f"/chats/{chat_id}/participants",
+            json={"user_ids": [str(user_c_id)]},
+            headers={"Authorization": f"Bearer {token1}"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        member_ids = {m["id"] for m in body["members"]}
+        assert str(user_c_id) in member_ids
+        assert len(body["members"]) == 3
+
+    @pytest.mark.asyncio
+    async def test_non_admin_cannot_add(self, client: AsyncClient):
+        token1, _ = await self._register(client, "user_a")
+        token2, user_b_id = await self._register(client, "user_b")
+        _, user_c_id = await self._register(client, "user_c")
+
+        chat = await self._create_group(client, token1, [str(user_b_id)])
+        chat_id = chat.json()["id"]
+
+        resp = await client.post(
+            f"/chats/{chat_id}/participants",
+            json={"user_ids": [str(user_c_id)]},
+            headers={"Authorization": f"Bearer {token2}"},
+        )
+        assert resp.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_add_to_personal_chat_fails(self, client: AsyncClient):
+        token1, _ = await self._register(client, "user_a")
+        _, user_b_id = await self._register(client, "user_b")
+        _, user_c_id = await self._register(client, "user_c")
+
+        chat = await client.post(
+            f"/chats/personal/{user_b_id}",
+            headers={"Authorization": f"Bearer {token1}"},
+        )
+        chat_id = chat.json()["id"]
+
+        resp = await client.post(
+            f"/chats/{chat_id}/participants",
+            json={"user_ids": [str(user_c_id)]},
+            headers={"Authorization": f"Bearer {token1}"},
+        )
+        assert resp.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_add_nonexistent_user(self, client: AsyncClient):
+        token1, _ = await self._register(client, "user_a")
+        _, user_b_id = await self._register(client, "user_b")
+
+        chat = await self._create_group(client, token1, [str(user_b_id)])
+        chat_id = chat.json()["id"]
+        fake_id = str(uuid.uuid4())
+
+        resp = await client.post(
+            f"/chats/{chat_id}/participants",
+            json={"user_ids": [fake_id]},
+            headers={"Authorization": f"Bearer {token1}"},
+        )
+        assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_add_duplicate_participant(self, client: AsyncClient):
+        token1, _ = await self._register(client, "user_a")
+        _, user_b_id = await self._register(client, "user_b")
+
+        chat = await self._create_group(client, token1, [str(user_b_id)])
+        chat_id = chat.json()["id"]
+
+        resp = await client.post(
+            f"/chats/{chat_id}/participants",
+            json={"user_ids": [str(user_b_id)]},
+            headers={"Authorization": f"Bearer {token1}"},
+        )
+        assert resp.status_code == 409
+
+    @pytest.mark.asyncio
+    async def test_admin_removes_member(self, client: AsyncClient):
+        token1, _ = await self._register(client, "user_a")
+        _, user_b_id = await self._register(client, "user_b")
+
+        chat = await self._create_group(client, token1, [str(user_b_id)])
+        chat_id = chat.json()["id"]
+
+        resp = await client.delete(
+            f"/chats/{chat_id}/participants/{user_b_id}",
+            headers={"Authorization": f"Bearer {token1}"},
+        )
+        assert resp.status_code == 204
+
+    @pytest.mark.asyncio
+    async def test_cannot_remove_last_admin(self, client: AsyncClient):
+        token1, user1_id = await self._register(client, "user_a")
+        _, user_b_id = await self._register(client, "user_b")
+
+        chat = await self._create_group(client, token1, [str(user_b_id)])
+        chat_id = chat.json()["id"]
+
+        resp = await client.delete(
+            f"/chats/{chat_id}/participants/{user_b_id}",
+            headers={"Authorization": f"Bearer {token1}"},
+        )
+        assert resp.status_code == 204
+
+        resp = await client.delete(
+            f"/chats/{chat_id}/participants/{user1_id}",
+            headers={"Authorization": f"Bearer {token1}"},
+        )
+        assert resp.status_code == 400
+        assert "last admin" in resp.json()["detail"].lower()
+
+    @pytest.mark.asyncio
+    async def test_non_admin_cannot_remove(self, client: AsyncClient):
+        token1, _ = await self._register(client, "user_a")
+        token2, user_b_id = await self._register(client, "user_b")
+        _, user_c_id = await self._register(client, "user_c")
+
+        chat = await self._create_group(client, token1, [str(user_b_id)])
+        chat_id = chat.json()["id"]
+
+        resp = await client.delete(
+            f"/chats/{chat_id}/participants/{user_c_id}",
+            headers={"Authorization": f"Bearer {token2}"},
+        )
+        assert resp.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_remove_nonexistent_participant(self, client: AsyncClient):
+        token1, _ = await self._register(client, "user_a")
+        _, user_b_id = await self._register(client, "user_b")
+
+        chat = await self._create_group(client, token1, [str(user_b_id)])
+        chat_id = chat.json()["id"]
+        fake_id = str(uuid.uuid4())
+
+        resp = await client.delete(
+            f"/chats/{chat_id}/participants/{fake_id}",
+            headers={"Authorization": f"Bearer {token1}"},
+        )
+        assert resp.status_code == 404

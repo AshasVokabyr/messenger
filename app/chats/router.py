@@ -1,15 +1,22 @@
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
-from sqlalchemy import exists, select
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from sqlalchemy import exists, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.auth.dependencies import get_current_user
-from app.chats.schemas import ChatCreateGroupRequest, ChatMemberResponse, ChatResponse
+from app.chats.schemas import (
+    AddParticipantsRequest,
+    ChatCreateGroupRequest,
+    ChatMemberResponse,
+    ChatResponse,
+)
 from app.db import get_db
+from app.messages.schemas import MessageCreateRequest, MessageCursorResponse, MessageResponse
 from app.models.chat import Chat, ChatType
 from app.models.chat_participant import ChatParticipant, ParticipantRole
+from app.models.message import Message
 from app.models.user import User
 
 router = APIRouter(prefix="/chats", tags=["chats"])
@@ -180,3 +187,205 @@ async def get_chat(
             for p in chat.participants
         ],
     )
+
+
+async def _require_admin(
+    chat_id: uuid.UUID,
+    user_id: uuid.UUID,
+    db: AsyncSession,
+) -> Chat:
+    result = await db.execute(
+        select(Chat)
+        .where(Chat.id == chat_id)
+        .options(selectinload(Chat.participants).selectinload(ChatParticipant.user))
+    )
+    chat = result.scalar_one_or_none()
+    if not chat:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Chat not found",
+        )
+    if chat.type != ChatType.group:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Participants can only be managed in group chats",
+        )
+    me = next(
+        (p for p in chat.participants if p.user_id == user_id), None
+    )
+    if me is None or me.role != ParticipantRole.admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only chat admins can manage participants",
+        )
+    return chat
+
+
+@router.post("/{chat_id}/participants", response_model=ChatResponse)
+async def add_participants(
+    chat_id: uuid.UUID,
+    body: AddParticipantsRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    chat = await _require_admin(chat_id, current_user.id, db)
+
+    for uid in body.user_ids:
+        result = await db.execute(select(User).where(User.id == uid))
+        if not result.scalar_one_or_none():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"User {uid} not found",
+            )
+
+    existing_ids = {p.user_id for p in chat.participants}
+    for uid in body.user_ids:
+        if uid in existing_ids:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"User {uid} is already a participant",
+            )
+
+    for uid in body.user_ids:
+        db.add(ChatParticipant(chat_id=chat.id, user_id=uid, role=ParticipantRole.member))
+
+    await db.commit()
+    return await _build_chat_response(chat.id, db)
+
+
+@router.delete("/{chat_id}/participants/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def remove_participant(
+    chat_id: uuid.UUID,
+    user_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    chat = await _require_admin(chat_id, current_user.id, db)
+
+    target = next(
+        (p for p in chat.participants if p.user_id == user_id), None
+    )
+    if target is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User is not a participant of this chat",
+        )
+
+    if target.role == ParticipantRole.admin:
+        admin_count = sum(
+            1 for p in chat.participants if p.role == ParticipantRole.admin
+        )
+        if admin_count <= 1:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot remove the last admin",
+            )
+
+    await db.delete(target)
+    await db.commit()
+    return None
+
+
+@router.post("/{chat_id}/messages", response_model=MessageResponse, status_code=status.HTTP_201_CREATED)
+async def send_chat_message(
+    chat_id: uuid.UUID,
+    body: MessageCreateRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    result = await db.execute(
+        select(ChatParticipant).where(
+            ChatParticipant.chat_id == chat_id,
+            ChatParticipant.user_id == current_user.id,
+        )
+    )
+    if not result.scalar_one_or_none():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You are not a member of this chat",
+        )
+
+    message = Message(chat_id=chat_id, user_id=current_user.id, content=body.content)
+    db.add(message)
+    await db.commit()
+    await db.refresh(message)
+    return message
+
+
+@router.get("/{chat_id}/messages/search", response_model=list[MessageResponse])
+async def search_chat_messages(
+    chat_id: uuid.UUID,
+    q: str = Query(..., min_length=1),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    limit: int = Query(50, ge=1, le=200),
+):
+    result = await db.execute(
+        select(ChatParticipant).where(
+            ChatParticipant.chat_id == chat_id,
+            ChatParticipant.user_id == current_user.id,
+        )
+    )
+    if not result.scalar_one_or_none():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You are not a member of this chat",
+        )
+
+    safe_q = q.replace("%", "\\%").replace("_", "\\_")
+    stmt = (
+        select(Message)
+        .where(
+            Message.chat_id == chat_id,
+            Message.content.ilike(f"%{safe_q}%"),
+        )
+        .order_by(Message.created_at.desc())
+        .limit(limit)
+    )
+    result = await db.execute(stmt)
+    return result.scalars().all()
+
+
+@router.get("/{chat_id}/messages", response_model=MessageCursorResponse)
+async def get_chat_messages_cursor(
+    chat_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    before: uuid.UUID | None = Query(default=None),
+    limit: int = Query(50, ge=1, le=200),
+):
+    result = await db.execute(
+        select(ChatParticipant).where(
+            ChatParticipant.chat_id == chat_id,
+            ChatParticipant.user_id == current_user.id,
+        )
+    )
+    if not result.scalar_one_or_none():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You are not a member of this chat",
+        )
+
+    base_order = Message.created_at.desc()
+    stmt = select(Message).where(Message.chat_id == chat_id)
+
+    if before is not None:
+        cursor_result = await db.execute(
+            select(Message.created_at, Message.id).where(Message.id == before)
+        )
+        row = cursor_result.one_or_none()
+        if row is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Cursor message not found",
+            )
+        cursor_created_at, cursor_id = row
+        stmt = stmt.where(
+            tuple_(Message.created_at, Message.id) < (cursor_created_at, cursor_id)
+        )
+
+    stmt = stmt.order_by(base_order, Message.id.desc()).limit(limit)
+
+    messages = (await db.execute(stmt)).scalars().all()
+    next_cursor = str(messages[-1].id) if len(messages) == limit else None
+    return MessageCursorResponse(items=messages, next_cursor=next_cursor)
