@@ -1,7 +1,7 @@
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
-from sqlalchemy import exists, select
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from sqlalchemy import exists, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -366,29 +366,25 @@ async def get_chat_messages_cursor(
             detail="You are not a member of this chat",
         )
 
+    base_order = Message.created_at.desc()
+    stmt = select(Message).where(Message.chat_id == chat_id)
+
     if before is not None:
         cursor_result = await db.execute(
-            select(Message.created_at).where(Message.id == before)
+            select(Message.created_at, Message.id).where(Message.id == before)
         )
-        cursor_created_at = cursor_result.scalar_one_or_none()
-        if cursor_created_at is None:
+        row = cursor_result.one_or_none()
+        if row is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Cursor message not found",
             )
-        stmt = (
-            select(Message)
-            .where(Message.chat_id == chat_id, Message.created_at < cursor_created_at)
-            .order_by(Message.created_at.desc())
-            .limit(limit)
+        cursor_created_at, cursor_id = row
+        stmt = stmt.where(
+            tuple_(Message.created_at, Message.id) < (cursor_created_at, cursor_id)
         )
-    else:
-        stmt = (
-            select(Message)
-            .where(Message.chat_id == chat_id)
-            .order_by(Message.created_at.desc())
-            .limit(limit)
-        )
+
+    stmt = stmt.order_by(base_order, Message.id.desc()).limit(limit)
 
     messages = (await db.execute(stmt)).scalars().all()
     next_cursor = str(messages[-1].id) if len(messages) == limit else None

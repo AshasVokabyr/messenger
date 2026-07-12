@@ -14,62 +14,6 @@ from app.models.user import User
 router = APIRouter(prefix="/messages", tags=["messages"])
 
 
-@router.post("/{chat_id}", response_model=MessageResponse, status_code=status.HTTP_201_CREATED)
-async def send_message(
-    chat_id: uuid.UUID,
-    body: MessageCreateRequest,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    result = await db.execute(
-        select(ChatParticipant).where(
-            ChatParticipant.chat_id == chat_id,
-            ChatParticipant.user_id == current_user.id,
-        )
-    )
-    if not result.scalar_one_or_none():
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="You are not a member of this chat",
-        )
-
-    message = Message(chat_id=chat_id, user_id=current_user.id, content=body.content)
-    db.add(message)
-    await db.commit()
-    await db.refresh(message)
-    return message
-
-
-@router.get("/{chat_id}", response_model=list[MessageResponse])
-async def get_chat_messages(
-    chat_id: uuid.UUID,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-    limit: int = Query(50, ge=1, le=200),
-    offset: int = Query(0, ge=0),
-):
-    result = await db.execute(
-        select(ChatParticipant).where(
-            ChatParticipant.chat_id == chat_id,
-            ChatParticipant.user_id == current_user.id,
-        )
-    )
-    if not result.scalar_one_or_none():
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="You are not a member of this chat",
-        )
-
-    result = await db.execute(
-        select(Message)
-        .where(Message.chat_id == chat_id)
-        .order_by(Message.created_at.desc())
-        .offset(offset)
-        .limit(limit)
-    )
-    return result.scalars().all()
-
-
 @router.get("/search/", response_model=list[MessageResponse])
 async def search_messages(
     q: str = Query(..., min_length=1),
