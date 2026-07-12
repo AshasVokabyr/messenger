@@ -22,3 +22,7 @@ class ChatResponse(BaseModel):
 class ChatCreateGroupRequest(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     participant_ids: list[uuid.UUID]
+
+
+class AddParticipantsRequest(BaseModel):
+    user_ids: list[uuid.UUID]

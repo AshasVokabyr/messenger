@@ -6,7 +6,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.auth.dependencies import get_current_user
-from app.chats.schemas import ChatCreateGroupRequest, ChatMemberResponse, ChatResponse
+from app.chats.schemas import (
+    AddParticipantsRequest,
+    ChatCreateGroupRequest,
+    ChatMemberResponse,
+    ChatResponse,
+)
 from app.db import get_db
 from app.models.chat import Chat, ChatType
 from app.models.chat_participant import ChatParticipant, ParticipantRole
@@ -180,3 +185,100 @@ async def get_chat(
             for p in chat.participants
         ],
     )
+
+
+async def _require_admin(
+    chat_id: uuid.UUID,
+    user_id: uuid.UUID,
+    db: AsyncSession,
+) -> Chat:
+    result = await db.execute(
+        select(Chat)
+        .where(Chat.id == chat_id)
+        .options(selectinload(Chat.participants).selectinload(ChatParticipant.user))
+    )
+    chat = result.scalar_one_or_none()
+    if not chat:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Chat not found",
+        )
+    if chat.type != ChatType.group:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Participants can only be managed in group chats",
+        )
+    me = next(
+        (p for p in chat.participants if p.user_id == user_id), None
+    )
+    if me is None or me.role != ParticipantRole.admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only chat admins can manage participants",
+        )
+    return chat
+
+
+@router.post("/{chat_id}/participants", response_model=ChatResponse)
+async def add_participants(
+    chat_id: uuid.UUID,
+    body: AddParticipantsRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    chat = await _require_admin(chat_id, current_user.id, db)
+
+    for uid in body.user_ids:
+        result = await db.execute(select(User).where(User.id == uid))
+        if not result.scalar_one_or_none():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"User {uid} not found",
+            )
+
+    existing_ids = {p.user_id for p in chat.participants}
+    for uid in body.user_ids:
+        if uid in existing_ids:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"User {uid} is already a participant",
+            )
+
+    for uid in body.user_ids:
+        db.add(ChatParticipant(chat_id=chat.id, user_id=uid, role=ParticipantRole.member))
+
+    await db.commit()
+    return await _build_chat_response(chat.id, db)
+
+
+@router.delete("/{chat_id}/participants/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def remove_participant(
+    chat_id: uuid.UUID,
+    user_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    chat = await _require_admin(chat_id, current_user.id, db)
+
+    target = next(
+        (p for p in chat.participants if p.user_id == user_id), None
+    )
+    if target is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User is not a participant of this chat",
+        )
+
+    if target.role == ParticipantRole.admin:
+        admin_count = sum(
+            1 for p in chat.participants if p.role == ParticipantRole.admin
+        )
+        if admin_count <= 1:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot remove the last admin",
+            )
+
+    await db.delete(target)
+    await db.commit()
+    return None
