@@ -28,10 +28,13 @@ async def close_producer() -> None:
 
 
 async def publish_event(topic: str, key: str, payload: dict) -> None:
-    producer = await get_producer()
-    await producer.send(
-        topic=topic,
-        key=key.encode(),
-        value=json.dumps(payload, default=str).encode(),
-    )
-    logger.info("Published event to topic=%s key=%s", topic, key)
+    try:
+        producer = await get_producer()
+        await producer.send(
+            topic=topic,
+            key=key.encode(),
+            value=json.dumps(payload, default=str).encode(),
+        )
+        logger.info("Published event to topic=%s key=%s", topic, key)
+    except Exception:
+        logger.exception("Failed to publish event to topic=%s key=%s", topic, key)
