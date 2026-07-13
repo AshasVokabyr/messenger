@@ -22,8 +22,21 @@ async def search_messages(
     current_user: User = Depends(get_current_user),
     limit: int = Query(50, ge=1, le=200),
 ):
-    safe_q = q.replace("%", "\\%").replace("_", "\\_")
-    stmt = select(Message).where(Message.content.ilike(f"%{safe_q}%"))
+    safe_q = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    if chat_id:
+        result = await db.execute(
+            select(ChatParticipant).where(
+                ChatParticipant.chat_id == chat_id,
+                ChatParticipant.user_id == current_user.id,
+            )
+        )
+        if not result.scalar_one_or_none():
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You are not a member of this chat",
+            )
+
+    stmt = select(Message).where(Message.content.ilike(f"%{safe_q}%", escape="\\"))
     if chat_id:
         stmt = stmt.where(Message.chat_id == chat_id)
     stmt = stmt.order_by(Message.created_at.desc()).limit(limit)

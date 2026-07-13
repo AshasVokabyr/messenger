@@ -29,7 +29,21 @@ class ConnectionManager:
                 logger.exception("Failed to send to user_id=%s", user_id)
 
     async def broadcast_to_chat(self, chat_id: uuid.UUID, message: dict) -> None:
-        pass
+        from sqlalchemy import select
+
+        from app.db import async_session
+        from app.models.chat_participant import ChatParticipant
+
+        async with async_session() as session:
+            result = await session.execute(
+                select(ChatParticipant.user_id).where(
+                    ChatParticipant.chat_id == chat_id
+                )
+            )
+            user_ids = result.scalars().all()
+
+        for uid in user_ids:
+            await self.send_to_user(uid, message)
 
 
 manager = ConnectionManager()

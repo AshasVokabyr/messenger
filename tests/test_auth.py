@@ -150,8 +150,8 @@ class TestAuthDependency:
         )["sub"])
 
         create_chat = await client.post(
-            "/chats/",
-            json={"name": "test-chat", "member_ids": [str(user2_id)]},
+            "/chats/group",
+            json={"name": "test-chat", "participant_ids": [str(user2_id)]},
             headers={"Authorization": f"Bearer {token1}"},
         )
         assert create_chat.status_code == 201

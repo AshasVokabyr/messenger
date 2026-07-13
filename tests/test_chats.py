@@ -1,4 +1,5 @@
 import uuid
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from httpx import AsyncClient
@@ -314,3 +315,49 @@ class TestParticipants:
             headers={"Authorization": f"Bearer {token1}"},
         )
         assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_add_participant_publishes_kafka_event(self, client: AsyncClient):
+        token1, _ = await self._register(client, "user_a")
+        _, user_b_id = await self._register(client, "user_b")
+        _, user_c_id = await self._register(client, "user_c")
+
+        chat = await self._create_group(client, token1, [str(user_b_id)])
+        chat_id = chat.json()["id"]
+
+        with patch("app.chats.router.publish_event", new_callable=AsyncMock) as mock_publish:
+            resp = await client.post(
+                f"/chats/{chat_id}/participants",
+                json={"user_ids": [str(user_c_id)]},
+                headers={"Authorization": f"Bearer {token1}"},
+            )
+            assert resp.status_code == 200
+
+            mock_publish.assert_awaited_once()
+            args, kwargs = mock_publish.call_args
+            assert kwargs["topic"] == "chat_events"
+            assert kwargs["key"] == str(chat_id)
+            assert kwargs["payload"]["type"] == "participants_added"
+            assert str(user_c_id) in kwargs["payload"]["user_ids"]
+
+    @pytest.mark.asyncio
+    async def test_remove_participant_publishes_kafka_event(self, client: AsyncClient):
+        token1, _ = await self._register(client, "user_a")
+        _, user_b_id = await self._register(client, "user_b")
+
+        chat = await self._create_group(client, token1, [str(user_b_id)])
+        chat_id = chat.json()["id"]
+
+        with patch("app.chats.router.publish_event", new_callable=AsyncMock) as mock_publish:
+            resp = await client.delete(
+                f"/chats/{chat_id}/participants/{user_b_id}",
+                headers={"Authorization": f"Bearer {token1}"},
+            )
+            assert resp.status_code == 204
+
+            mock_publish.assert_awaited_once()
+            args, kwargs = mock_publish.call_args
+            assert kwargs["topic"] == "chat_events"
+            assert kwargs["key"] == str(chat_id)
+            assert kwargs["payload"]["type"] == "participant_removed"
+            assert kwargs["payload"]["user_id"] == str(user_b_id)
