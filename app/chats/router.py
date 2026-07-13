@@ -93,6 +93,18 @@ async def create_personal_chat(
         db.add(ChatParticipant(chat_id=chat.id, user_id=mid, role=ParticipantRole.member))
 
     await db.commit()
+
+    await publish_event(
+        topic="chat_events",
+        key=str(chat.id),
+        payload={
+            "type": "chat_created",
+            "chat_id": str(chat.id),
+            "chat_type": chat.type.value,
+            "user_ids": [str(current_user.id), str(user_id)],
+        },
+    )
+
     return await _build_chat_response(chat.id, db)
 
 
@@ -126,6 +138,19 @@ async def create_group_chat(
         db.add(ChatParticipant(chat_id=chat.id, user_id=mid, role=role))
 
     await db.commit()
+
+    await publish_event(
+        topic="chat_events",
+        key=str(chat.id),
+        payload={
+            "type": "chat_created",
+            "chat_id": str(chat.id),
+            "chat_type": chat.type.value,
+            "name": chat.name,
+            "user_ids": [str(uid) for uid in all_ids],
+        },
+    )
+
     return await _build_chat_response(chat.id, db)
 
 
@@ -370,7 +395,7 @@ async def search_chat_messages(
             detail="You are not a member of this chat",
         )
 
-    safe_q = q.replace("%", "\\%").replace("_", "\\_")
+    safe_q = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     stmt = (
         select(Message)
         .where(
