@@ -1,5 +1,6 @@
 import asyncio
 from collections.abc import AsyncGenerator
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import pytest_asyncio
@@ -51,3 +52,9 @@ async def client() -> AsyncGenerator[AsyncClient, None]:
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _mock_kafka():
+    with patch("app.chats.router.publish_event", new_callable=AsyncMock):
+        yield

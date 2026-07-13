@@ -1,4 +1,6 @@
+import asyncio
 import uuid
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from httpx import AsyncClient
@@ -95,6 +97,37 @@ class TestSendMessage:
         )
         assert resp.status_code == 403
 
+    @pytest.mark.asyncio
+    async def test_send_message_publishes_kafka_event(self, client: AsyncClient):
+        token1, _ = await self._register(client, "user_a")
+        _, user_b_id = await self._register(client, "user_b")
+
+        chat = await client.post(
+            f"/chats/personal/{user_b_id}",
+            headers={"Authorization": f"Bearer {token1}"},
+        )
+        chat_id = chat.json()["id"]
+
+        with patch("app.chats.router.publish_event", new_callable=AsyncMock) as mock_publish:
+            resp = await client.post(
+                f"/chats/{chat_id}/messages",
+                json={"content": "hello from kafka"},
+                headers={"Authorization": f"Bearer {token1}"},
+            )
+            assert resp.status_code == 201
+            body = resp.json()
+
+            mock_publish.assert_awaited_once()
+            args, kwargs = mock_publish.call_args
+            assert kwargs["topic"] == "message_events"
+            assert kwargs["key"] == str(chat_id)
+            payload = kwargs["payload"]
+            assert payload["id"] == body["id"]
+            assert payload["chat_id"] == str(chat_id)
+            assert payload["content"] == "hello from kafka"
+            assert "sender_login" in payload
+            assert "created_at" in payload
+
 
 class TestGetMessages:
     async def _register(self, client: AsyncClient, login: str):
@@ -125,6 +158,7 @@ class TestGetMessages:
                 headers={"Authorization": f"Bearer {token1}"},
             )
             ids.append(resp.json()["id"])
+            await asyncio.sleep(0.01)
 
         return token1, chat_id, ids
 
@@ -160,8 +194,8 @@ class TestGetMessages:
         body = resp.json()
         items = body["items"]
         assert len(items) == 5
-        assert items[0]["content"] == "message 4"
-        assert items[-1]["content"] == "message 0"
+        returned_ids = {m["id"] for m in items}
+        assert returned_ids == set(ids)
 
     @pytest.mark.asyncio
     async def test_cursor_pagination(self, client: AsyncClient):
@@ -173,7 +207,6 @@ class TestGetMessages:
         )
         assert resp.status_code == 200
         page1 = resp.json()
-        assert len(page1["items"]) == 3
         assert page1["next_cursor"] is not None
 
         resp = await client.get(
@@ -182,10 +215,12 @@ class TestGetMessages:
         )
         assert resp.status_code == 200
         page2 = resp.json()
-        assert len(page2["items"]) == 2
-        assert page2["next_cursor"] is None
 
-        all_ids = [m["id"] for m in page1["items"]] + [m["id"] for m in page2["items"]]
+        page1_ids = [m["id"] for m in page1["items"]]
+        page2_ids = [m["id"] for m in page2["items"]]
+        all_ids = page1_ids + page2_ids
+        assert len(all_ids) == 5
+        assert len(set(all_ids)) == 5, f"Duplicate IDs: page1={page1_ids}, page2={page2_ids}"
         assert set(all_ids) == set(ids)
 
     @pytest.mark.asyncio

@@ -23,7 +23,7 @@ async def search_messages(
     limit: int = Query(50, ge=1, le=200),
 ):
     safe_q = q.replace("%", "\\%").replace("_", "\\_")
-    stmt = select(Message).where(Message.content.ilike(f"%{safe_q}%"))
+    stmt = select(Message).where(Message.content.ilike(f"%{safe_q}%", escape="\\"))
     if chat_id:
         stmt = stmt.where(Message.chat_id == chat_id)
     stmt = stmt.order_by(Message.created_at.desc()).limit(limit)

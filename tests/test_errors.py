@@ -73,7 +73,7 @@ class TestErrorFormat:
     async def test_request_id_is_uuid_on_all_errors(self, client: AsyncClient):
         endpoints = [
             ("GET", "/chats/", {}),
-            ("POST", "/chats/", {"json": {}}),
+            ("POST", "/chats/group", {"json": {}}),
         ]
         for method, path, kwargs in endpoints:
             if method == "GET":

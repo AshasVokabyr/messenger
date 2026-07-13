@@ -1,7 +1,7 @@
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
-from sqlalchemy import exists, select, tuple_
+from sqlalchemy import exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -13,6 +13,7 @@ from app.chats.schemas import (
     ChatResponse,
 )
 from app.db import get_db
+from app.kafka.producer import publish_event
 from app.messages.schemas import MessageCreateRequest, MessageCursorResponse, MessageResponse
 from app.models.chat import Chat, ChatType
 from app.models.chat_participant import ChatParticipant, ParticipantRole
@@ -250,7 +251,19 @@ async def add_participants(
         db.add(ChatParticipant(chat_id=chat.id, user_id=uid, role=ParticipantRole.member))
 
     await db.commit()
-    return await _build_chat_response(chat.id, db)
+    db.expire(chat)
+
+    await publish_event(
+        topic="chat_events",
+        key=str(chat_id),
+        payload={
+            "type": "participants_added",
+            "chat_id": str(chat_id),
+            "user_ids": [str(uid) for uid in body.user_ids],
+        },
+    )
+
+    return await _build_chat_response(chat_id, db)
 
 
 @router.delete("/{chat_id}/participants/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -283,6 +296,17 @@ async def remove_participant(
 
     await db.delete(target)
     await db.commit()
+
+    await publish_event(
+        topic="chat_events",
+        key=str(chat_id),
+        payload={
+            "type": "participant_removed",
+            "chat_id": str(chat_id),
+            "user_id": str(user_id),
+        },
+    )
+
     return None
 
 
@@ -309,6 +333,20 @@ async def send_chat_message(
     db.add(message)
     await db.commit()
     await db.refresh(message)
+
+    await publish_event(
+        topic="message_events",
+        key=str(chat_id),
+        payload={
+            "id": str(message.id),
+            "chat_id": str(chat_id),
+            "user_id": str(current_user.id),
+            "content": body.content,
+            "created_at": message.created_at.isoformat(),
+            "sender_login": current_user.login,
+        },
+    )
+
     return message
 
 
@@ -337,7 +375,7 @@ async def search_chat_messages(
         select(Message)
         .where(
             Message.chat_id == chat_id,
-            Message.content.ilike(f"%{safe_q}%"),
+            Message.content.ilike(f"%{safe_q}%", escape="\\"),
         )
         .order_by(Message.created_at.desc())
         .limit(limit)
@@ -381,7 +419,8 @@ async def get_chat_messages_cursor(
             )
         cursor_created_at, cursor_id = row
         stmt = stmt.where(
-            tuple_(Message.created_at, Message.id) < (cursor_created_at, cursor_id)
+            (Message.created_at < cursor_created_at)
+            | ((Message.created_at == cursor_created_at) & (Message.id < cursor_id))
         )
 
     stmt = stmt.order_by(base_order, Message.id.desc()).limit(limit)
