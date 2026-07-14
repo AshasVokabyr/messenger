@@ -67,7 +67,7 @@ class TestConsumeLoop:
         with (
             patch("app.kafka.consumer._consumer", consumer),
             patch("app.kafka.consumer._dispatch", new_callable=AsyncMock) as dispatch_mock,
-            patch("app.kafka.consumer.RETRY_DELAY", 0.05),
+            patch("app.kafka.consumer.BASE_DELAY", 0.05),
         ):
             task = asyncio.create_task(_consume_loop())
             await asyncio.sleep(0.05)
@@ -89,10 +89,28 @@ class TestConsumeLoop:
 
         with (
             patch("app.kafka.consumer._consumer", consumer),
-            patch("app.kafka.consumer.RETRY_DELAY", 0.05),
+            patch("app.kafka.consumer.BASE_DELAY", 0.001),
+            patch("app.kafka.consumer.MAX_RETRIES", 3),
+        ):
+            result = await _consume_loop()
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_consume_loop_resets_retries_on_success(self):
+        from app.kafka.consumer import _consume_loop
+
+        msg = MockMessage("message_events", {"content": "ok"})
+        consumer = MockConsumer([msg], exc_stop=KafkaConnectionError("error"))
+
+        with (
+            patch("app.kafka.consumer._consumer", consumer),
+            patch("app.kafka.consumer.BASE_DELAY", 0.001),
+            patch("app.kafka.consumer.MAX_RETRIES", 3),
+            patch("app.kafka.consumer._dispatch", new_callable=AsyncMock),
         ):
             task = asyncio.create_task(_consume_loop())
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.05)
             task.cancel()
             try:
                 await task
