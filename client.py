@@ -113,6 +113,16 @@ class MessengerClient:
                 return chat["id"]
         return None
 
+    async def _resolve_ref(self, ref: str) -> str | None:
+        cid = self.resolve_chat_ref(ref)
+        if cid is not None:
+            return cid
+        try:
+            await self.get_chats()
+        except Exception:
+            pass
+        return self.resolve_chat_ref(ref)
+
     async def _auth_header(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.token}"}
 
@@ -487,7 +497,7 @@ async def interactive_mode(client: MessengerClient) -> None:
                     if len(parts) < 2:
                         print("Usage: /join <ref>")
                         continue
-                    cid = client.resolve_chat_ref(parts[1])
+                    cid = await client._resolve_ref(parts[1])
                     if not cid:
                         print_formatted_text(HTML(f"<ansired>Chat not found: {parts[1]}</ansired>"))
                         continue
@@ -500,7 +510,7 @@ async def interactive_mode(client: MessengerClient) -> None:
                     if len(parts) < 2:
                         print("Usage: /leave <ref>")
                         continue
-                    cid = client.resolve_chat_ref(parts[1])
+                    cid = await client._resolve_ref(parts[1])
                     if not cid:
                         print_formatted_text(HTML(f"<ansired>Chat not found: {parts[1]}</ansired>"))
                         continue
@@ -529,7 +539,7 @@ async def interactive_mode(client: MessengerClient) -> None:
                     if not ref:
                         print("Usage: /enter <ref> [N]")
                         continue
-                    cid = client.resolve_chat_ref(ref)
+                    cid = await client._resolve_ref(ref)
                     if not cid:
                         print_formatted_text(HTML(f"<ansired>Chat not found: {ref}</ansired>"))
                         continue
@@ -559,7 +569,7 @@ async def interactive_mode(client: MessengerClient) -> None:
                                 print_formatted_text(HTML(f"  {i}. {name}{mark}"))
                             print("Use /switch <number|name> to switch")
                         continue
-                    cid = client.resolve_chat_ref(parts[1])
+                    cid = await client._resolve_ref(parts[1])
                     if not cid:
                         print_formatted_text(HTML(f"<ansired>Chat not found: {parts[1]}</ansired>"))
                         continue
