@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 from collections.abc import AsyncGenerator
 from unittest.mock import AsyncMock, patch
 
@@ -56,5 +57,13 @@ async def client() -> AsyncGenerator[AsyncClient, None]:
 
 @pytest_asyncio.fixture(autouse=True)
 async def _mock_kafka():
-    with patch("app.chats.router.publish_event", new_callable=AsyncMock):
+    patches = [
+        patch("app.chats.router.publish_event", new_callable=AsyncMock),
+        patch("app.main.start_consumer", new_callable=AsyncMock),
+        patch("app.main.stop_consumer", new_callable=AsyncMock),
+        patch("app.main.close_producer", new_callable=AsyncMock),
+    ]
+    with contextlib.ExitStack() as stack:
+        for p in patches:
+            stack.enter_context(p)
         yield
