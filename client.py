@@ -2,6 +2,7 @@ import argparse
 import asyncio
 import json
 import sys
+import uuid
 from datetime import datetime
 
 import httpx
@@ -12,6 +13,7 @@ GREEN = "\033[92m"
 YELLOW = "\033[93m"
 BOLD = "\033[1m"
 RESET = "\033[0m"
+DIM = "\033[2m"
 
 
 class MessengerClient:
@@ -22,6 +24,8 @@ class MessengerClient:
         self.login_name: str | None = None
         self.current_chat_id: str | None = None
         self._chats_cache: dict[str, dict] = {}
+        self._chat_list: list[dict] = []
+        self._chat_ids_by_login: dict[str, str] = {}
         self._ws_queue: asyncio.Queue = asyncio.Queue()
         self._subscribed_chats: set[str] = set()
         self._stop = asyncio.Event()
@@ -30,12 +34,8 @@ class MessengerClient:
     def _prompt(self) -> str:
         ctx = self.login_name or ""
         if self.current_chat_id:
-            cc = self.current_chat_id
-            if cc in self._chats_cache:
-                c = self._chats_cache[cc]
-                ctx += "@" + self._resolve_chat_name(c, short=True)
-            else:
-                ctx += "@" + cc[:12]
+            name = self._chat_display_name(self.current_chat_id)
+            ctx += "@" + name
         return f"{BOLD}{ctx}{RESET} > " if ctx else "> "
 
     def _print(self, text: str, end: str = "\n") -> None:
@@ -43,20 +43,52 @@ class MessengerClient:
 
     def _prompted_print(self, text: str) -> None:
         prompt = self._prompt()
-        print(f"\r{text}\n{prompt}", end="", flush=True)
+        print(f"\r\033[K{text}\n\033[K{prompt}", end="", flush=True)
 
     @staticmethod
-    def _resolve_chat_name(chat: dict, short: bool = False) -> str:
-        if chat["type"] == "personal":
-            members = chat.get("members", [])
-            me = next((m for m in members if m.get("_me")), None)
-            others = [m["login"] for m in members if not m.get("_me")]
-            name = others[0] if others else "personal"
-        else:
-            name = chat.get("name", "Unnamed")
-        if short and len(name) > 20:
-            name = name[:17] + "..."
-        return name
+    def _format_member_list(members: list[dict]) -> str:
+        return ", ".join(m["login"] for m in members)
+
+    def _chat_name(self, chat: dict) -> str:
+        if chat["type"] == "personal" and self.login_name:
+            others = [m["login"] for m in chat.get("members", []) if m["login"] != self.login_name]
+            return others[0] if others else "personal"
+        return chat.get("name", "Unnamed") or "Unnamed"
+
+    def _chat_display_name(self, chat_id: str) -> str:
+        chat = self._chats_cache.get(chat_id)
+        if chat:
+            return self._chat_name(chat)
+        return chat_id[:12]
+
+    def _cache_chat(self, chat: dict) -> None:
+        cid = chat["id"]
+        self._chats_cache[cid] = chat
+        if chat["type"] == "personal" and self.login_name:
+            others = [m["login"] for m in chat.get("members", []) if m["login"] != self.login_name]
+            for ol in others:
+                self._chat_ids_by_login[ol] = cid
+
+    def resolve_chat_ref(self, ref: str) -> str | None:
+        if ref.isdigit():
+            idx = int(ref) - 1
+            if 0 <= idx < len(self._chat_list):
+                return self._chat_list[idx]["id"]
+        if ref in self._chat_ids_by_login:
+            return self._chat_ids_by_login[ref]
+        if ref in self._chats_cache:
+            return ref
+        try:
+            uuid.UUID(ref)
+            return ref
+        except (ValueError, AttributeError):
+            pass
+        lower = ref.lower()
+        for chat in self._chat_list:
+            name = self._chat_name(chat).lower()
+            if lower == name:
+                return chat["id"]
+        return None
 
     async def _auth_header(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.token}"}
@@ -82,10 +114,9 @@ class MessengerClient:
             resp = await c.get(f"{self.base_url}/chats/", headers=await self._auth_header())
             if resp.status_code == 200:
                 chats = resp.json()
+                self._chat_list = chats
                 for chat in chats:
-                    for m in chat.get("members", []):
-                        m["_me"] = m["login"] == self.login_name
-                    self._chats_cache[chat["id"]] = chat
+                    self._cache_chat(chat)
                 return chats
             raise RuntimeError(f"Failed to list chats ({resp.status_code})")
 
@@ -94,9 +125,7 @@ class MessengerClient:
             resp = await c.get(f"{self.base_url}/chats/{chat_id}", headers=await self._auth_header())
             if resp.status_code == 200:
                 chat = resp.json()
-                for m in chat.get("members", []):
-                    m["_me"] = m["login"] == self.login_name
-                self._chats_cache[chat["id"]] = chat
+                self._cache_chat(chat)
                 return chat
             raise RuntimeError(f"Failed to get chat ({resp.status_code})")
 
@@ -122,9 +151,7 @@ class MessengerClient:
             )
             if resp.status_code in (200, 201):
                 chat = resp.json()
-                for m in chat.get("members", []):
-                    m["_me"] = m["login"] == self.login_name
-                self._chats_cache[chat["id"]] = chat
+                self._cache_chat(chat)
                 return chat
             raise RuntimeError(f"Failed to create personal chat ({resp.status_code}): {resp.json().get('detail', '')}")
 
@@ -137,9 +164,7 @@ class MessengerClient:
             )
             if resp.status_code == 201:
                 chat = resp.json()
-                for m in chat.get("members", []):
-                    m["_me"] = m["login"] == self.login_name
-                self._chats_cache[chat["id"]] = chat
+                self._cache_chat(chat)
                 return chat
             raise RuntimeError(f"Failed to create group chat ({resp.status_code}): {resp.json().get('detail', '')}")
 
@@ -196,12 +221,14 @@ class MessengerClient:
             elif t == "joined":
                 cid = data["chat_id"]
                 self._subscribed_chats.add(cid)
-                self._prompted_print(f"{CYAN}Joined chat {cid[:12]}{RESET}")
+                name = self._chat_display_name(cid)
+                self._prompted_print(f"{DIM}Joined {name}{RESET}")
 
             elif t == "left":
                 cid = data["chat_id"]
                 self._subscribed_chats.discard(cid)
-                self._prompted_print(f"{CYAN}Left chat {cid[:12]}{RESET}")
+                name = self._chat_display_name(cid)
+                self._prompted_print(f"{DIM}Left {name}{RESET}")
 
             elif t == "ping":
                 pass
@@ -231,7 +258,7 @@ class MessengerClient:
                             pass
             except (websockets.ConnectionClosed, OSError) as e:
                 if not self._stop.is_set():
-                    self._prompted_print(f"{YELLOW}WS disconnected ({e}), reconnecting in 3s...{RESET}")
+                    self._print(f"{DIM}WS disconnected, reconnecting in 3s...{RESET}")
                     await asyncio.sleep(3)
 
     async def start_ws(self) -> None:
@@ -247,14 +274,35 @@ class MessengerClient:
             except asyncio.CancelledError:
                 pass
 
+    def print_chat_list(self, chats: list[dict] | None = None) -> None:
+        lst = chats if chats is not None else self._chat_list
+        for i, c in enumerate(lst, 1):
+            name = self._chat_name(c)
+            if c["type"] == "personal":
+                self._print(f"  {i}. {GREEN}{name}{RESET}")
+            else:
+                members = self._format_member_list(c.get("members", []))
+                self._print(f"  {i}. {CYAN}{name}{RESET} ({members})")
+
+    def print_history(self, chat_id: str, msgs: list[dict]) -> None:
+        name = self._chat_display_name(chat_id)
+        if not msgs:
+            self._print(f"{DIM}No messages in {name}{RESET}")
+            return
+        self._print(f"{DIM}--- History of {name} ({len(msgs)} messages) ---{RESET}")
+        for m in reversed(msgs):
+            ts = datetime.fromisoformat(m["created_at"]).strftime("%H:%M:%S")
+            sender = m.get("sender_login", "unknown")
+            is_me = sender == self.login_name
+            color = GREEN if is_me else YELLOW
+            self._print(f"  [{ts}] {color}{sender}{RESET}: {m['content']}")
+
 
 async def interactive_mode(client: MessengerClient) -> None:
     print(f"{BOLD}{client.login_name}{RESET} connected")
     chats = await client.get_chats()
     if chats:
-        for c in chats:
-            name = client._resolve_chat_name(c)
-            print(f"  {c['id'][:12]}  {name}")
+        client.print_chat_list()
     else:
         print("  No chats yet")
 
@@ -265,7 +313,11 @@ async def interactive_mode(client: MessengerClient) -> None:
     try:
         while True:
             prompt = client._prompt()
-            line = await asyncio.to_thread(lambda: input(prompt))
+            raw = await asyncio.to_thread(lambda: input(prompt))
+            if not raw:
+                continue
+            line = raw.strip()
+
             if not line:
                 continue
 
@@ -278,9 +330,11 @@ async def interactive_mode(client: MessengerClient) -> None:
             elif cmd == "/help":
                 print("""
   /help                    Show this help
-  /chats                   List your chats
-  /join <chat_id>          Join chat (subscribe + set current)
-  /leave <chat_id>         Leave chat (unsubscribe)
+  /chats                   List your chats (numbered)
+  /join <ref>              Subscribe to chat + set as current
+  /leave <ref>             Unsubscribe from chat
+  /enter <ref> [N]         Join + show last N messages
+  /switch [ref]            Switch current chat (list if no ref)
   /personal <login>        Create personal chat by login
   /group <name> <id1>...   Create group chat
   /create_user <l> <p>     Register a new user
@@ -288,42 +342,101 @@ async def interactive_mode(client: MessengerClient) -> None:
   /messages [N]            Show last N messages in current chat
   /members                 Show members of current chat
   /quit                    Exit
-  <any text>               Send message to current chat""")
+  <any text>               Send message to current chat
+
+Ref can be: number from /chats, login (for personal chats),
+            or chat_id (UUID).""")
 
             elif cmd == "/chats":
                 try:
                     chats = await client.get_chats()
-                    for c in chats:
-                        name = client._resolve_chat_name(c)
-                        print(f"  {c['id'][:12]}  {name}")
+                    if chats:
+                        client.print_chat_list(chats)
+                    else:
+                        print("  No chats")
                 except Exception as e:
                     print(f"Error: {e}")
 
             elif cmd == "/join":
                 if len(parts) < 2:
-                    print("Usage: /join <chat_id>")
+                    print("Usage: /join <ref>")
                     continue
-                cid = parts[1]
+                cid = client.resolve_chat_ref(parts[1])
+                if not cid:
+                    cid = parts[1]
                 client.current_chat_id = cid
                 await client.ws_send({"action": "join", "chat_id": cid})
-                print(f"Joining chat {cid[:12]}")
+                name = client._chat_display_name(cid)
+                print(f"Joined {name}")
 
             elif cmd == "/leave":
                 if len(parts) < 2:
-                    print("Usage: /leave <chat_id>")
+                    print("Usage: /leave <ref>")
                     continue
-                cid = parts[1]
+                cid = client.resolve_chat_ref(parts[1])
+                if not cid:
+                    cid = parts[1]
                 if client.current_chat_id == cid:
                     client.current_chat_id = None
                 await client.ws_send({"action": "leave", "chat_id": cid})
-                print(f"Leaving chat {cid[:12]}")
+                name = client._chat_display_name(cid)
+                print(f"Left {name}")
+
+            elif cmd == "/enter":
+                limit = 20
+                if len(parts) >= 2:
+                    ref = parts[1]
+                    if len(parts) >= 3:
+                        try:
+                            limit = int(parts[2])
+                        except ValueError:
+                            pass
+                else:
+                    ref = client.current_chat_id
+                if not ref:
+                    print("Usage: /enter <ref> [N]")
+                    continue
+                cid = client.resolve_chat_ref(ref) or ref
+                if client.current_chat_id != cid:
+                    client.current_chat_id = cid
+                    await client.ws_send({"action": "join", "chat_id": cid})
+                name = client._chat_display_name(cid)
+                print(f"{BOLD}=== {name} ==={RESET}")
+                try:
+                    msgs = await client.get_messages(cid, limit)
+                    client.print_history(cid, msgs)
+                except Exception as e:
+                    print(f"  {DIM}Could not load history: {e}{RESET}")
+
+            elif cmd == "/switch":
+                if len(parts) < 2:
+                    subscribed = [c for c in client._chat_list if c["id"] in client._subscribed_chats]
+                    if not subscribed:
+                        print("No subscribed chats. Use /join or /enter first.")
+                    else:
+                        print("Subscribed chats:")
+                        for i, c in enumerate(subscribed, 1):
+                            name = client._chat_name(c)
+                            mark = f" {GREEN}*{RESET}" if c["id"] == client.current_chat_id else ""
+                            print(f"  {i}. {name}{mark}")
+                        print(f"Use /switch <number|name> to switch")
+                    continue
+                cid = client.resolve_chat_ref(parts[1])
+                if not cid:
+                    cid = parts[1]
+                if cid not in client._subscribed_chats:
+                    await client.ws_send({"action": "join", "chat_id": cid})
+                    client._subscribed_chats.add(cid)
+                client.current_chat_id = cid
+                name = client._chat_display_name(cid)
+                print(f"Switched to {name}")
 
             elif cmd == "/create_user":
                 if len(parts) < 3:
                     print("Usage: /create_user <login> <password>")
                     continue
-                mc = MessengerClient(client.base_url)
                 try:
+                    mc = MessengerClient(client.base_url)
                     await mc.register(parts[1], parts[2])
                     print(f"User {parts[1]} created")
                 except Exception as e:
@@ -336,7 +449,7 @@ async def interactive_mode(client: MessengerClient) -> None:
                 try:
                     user = await client.get_user_by_login(parts[1])
                     chat = await client.create_personal_chat(str(user["id"]))
-                    name = client._resolve_chat_name(chat)
+                    name = client._chat_name(chat)
                     print(f"Personal chat {chat['id'][:12]} ({name})")
                 except Exception as e:
                     print(f"Error: {e}")
@@ -371,16 +484,11 @@ async def interactive_mode(client: MessengerClient) -> None:
                         print("Usage: /messages [N]")
                         continue
                 if not client.current_chat_id:
-                    print("No current chat. Use /join <chat_id> first.")
+                    print("No current chat. Use /join, /enter, or /switch first.")
                     continue
                 try:
                     msgs = await client.get_messages(client.current_chat_id, limit)
-                    for m in reversed(msgs):
-                        ts = datetime.fromisoformat(m["created_at"]).strftime("%H:%M:%S")
-                        sender = m.get("sender_login", "unknown")
-                        is_me = sender == client.login_name
-                        color = GREEN if is_me else YELLOW
-                        print(f"  [{ts}] {color}{sender}{RESET}: {m['content']}")
+                    client.print_history(client.current_chat_id, msgs)
                 except Exception as e:
                     print(f"Error: {e}")
 
@@ -391,7 +499,7 @@ async def interactive_mode(client: MessengerClient) -> None:
                 try:
                     chat = await client.get_chat(client.current_chat_id)
                     for m in chat.get("members", []):
-                        tag = " (you)" if m.get("_me") else ""
+                        tag = " (you)" if m["login"] == client.login_name else ""
                         print(f"  {m['login']}{tag}")
                 except Exception as e:
                     print(f"Error: {e}")
@@ -405,7 +513,7 @@ async def interactive_mode(client: MessengerClient) -> None:
                 except Exception as e:
                     print(f"Error: {e}")
             else:
-                print("No current chat. Use /join <chat_id> to select a chat.")
+                print("No current chat. Use /join, /enter, or /switch first.")
     finally:
         await client.stop_ws()
 
