@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 
@@ -28,13 +29,26 @@ async def close_producer() -> None:
 
 
 async def publish_event(topic: str, key: str, payload: dict) -> None:
-    try:
-        producer = await get_producer()
-        await producer.send(
-            topic=topic,
-            key=key.encode(),
-            value=json.dumps(payload, default=str).encode(),
-        )
-        logger.info("Published event to topic=%s key=%s", topic, key)
-    except Exception:
-        logger.exception("Failed to publish event to topic=%s key=%s", topic, key)
+    delays = [1, 2, 4]
+    for attempt in range(len(delays) + 1):
+        try:
+            producer = await get_producer()
+            await producer.send(
+                topic=topic,
+                key=key.encode(),
+                value=json.dumps(payload, default=str).encode(),
+            )
+            logger.info("Published event to topic=%s key=%s", topic, key)
+            return
+        except Exception:
+            if attempt < len(delays):
+                logger.warning(
+                    "Failed to publish to topic=%s key=%s (attempt %d/%d)",
+                    topic, key, attempt + 1, len(delays) + 1, exc_info=True,
+                )
+                await asyncio.sleep(delays[attempt])
+            else:
+                logger.exception(
+                    "CRITICAL: Lost event topic=%s key=%s after %d attempts",
+                    topic, key, len(delays) + 1,
+                )
