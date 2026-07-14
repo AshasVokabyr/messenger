@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse
 from app.auth.router import router as auth_router
 from app.chats.router import router as chats_router
 from app.config import settings
+from app.db import Base, engine
 from app.exceptions_handlers import (
     http_exception_handler,
     unhandled_exception_handler,
@@ -24,6 +25,8 @@ from app.websocket.router import router as ws_router
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     configure_logging()
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
     await start_consumer()
     yield
     await close_producer()

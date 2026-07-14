@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import json
+import os
 import sys
 import uuid
 from datetime import datetime
@@ -13,13 +14,17 @@ from prompt_toolkit.completion import DynamicCompleter, WordCompleter
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.patch_stdout import patch_stdout
 
-CYAN = "\033[96m"
-GREEN = "\033[92m"
-YELLOW = "\033[93m"
-BOLD = "\033[1m"
-RESET = "\033[0m"
-DIM = "\033[2m"
-RED = "\033[91m"
+_USE_COLOR = sys.stdout.isatty() and os.environ.get("TERM") != "dumb"
+if _USE_COLOR:
+    CYAN = "\033[96m"
+    GREEN = "\033[92m"
+    YELLOW = "\033[93m"
+    BOLD = "\033[1m"
+    RESET = "\033[0m"
+    DIM = "\033[2m"
+    RED = "\033[91m"
+else:
+    CYAN = GREEN = YELLOW = BOLD = RESET = DIM = RED = ""
 
 
 class MessengerClient:
@@ -76,10 +81,12 @@ class MessengerClient:
                 self._chat_ids_by_login[ol] = cid
 
     def _build_completer_words(self) -> list[str]:
+        if not self.authenticated:
+            return ["/help", "/register", "/login", "/quit", "/exit"]
         words = [
             "/help", "/chats", "/join", "/leave", "/enter", "/switch",
-            "/personal", "/group", "/register", "/login", "/users",
-            "/messages", "/members", "/quit",
+            "/personal", "/group", "/register", "/login", "/logout",
+            "/users", "/messages", "/members", "/quit", "/exit",
         ]
         words.extend(self._chat_ids_by_login.keys())
         for i in range(len(self._chat_list)):
@@ -322,7 +329,9 @@ class MessengerClient:
 _HELP_AUTH = """
   /register <login> <pwd>  Register a new user and log in
   /login <login> <pwd>     Log in as existing user
-  /quit                    Exit"""
+  /help                    Show this help
+  /quit                    Exit the program
+  /exit                    Exit the program"""
 
 _HELP_FULL = """
   /help                    Show this help
@@ -335,10 +344,12 @@ _HELP_FULL = """
   /group <name> <id1>...   Create group chat
   /register <l> <p>        Register a new user
   /login <l> <p>           Log in as existing user
+  /logout                  Log out and return to anonymous mode
   /users <query>           Search users by login
   /messages [N]            Show last N messages in current chat
   /members                 Show members of current chat
-  /quit                    Exit
+  /quit                    Exit the program
+  /exit                    Exit the program
   <any text>               Send message to current chat
 
 Ref can be: number from /chats, login (for personal chats),
@@ -389,7 +400,7 @@ async def interactive_mode(client: MessengerClient) -> None:
                 parts = line.split()
                 cmd = parts[0]
 
-                if cmd in ("/quit",):
+                if cmd in ("/quit", "/exit"):
                     break
 
                 elif cmd == "/help":
@@ -424,6 +435,21 @@ async def interactive_mode(client: MessengerClient) -> None:
                         print(f"Logged in as {GREEN}{parts[1]}{RESET}")
                     except Exception as e:
                         print(f"{RED}Error: {e}{RESET}")
+
+                elif cmd == "/logout":
+                    if not client.authenticated:
+                        print("Not logged in.")
+                    else:
+                        await client.stop_ws()
+                        client.token = None
+                        client.login_name = None
+                        client.current_chat_id = None
+                        client._chats_cache.clear()
+                        client._chat_list.clear()
+                        client._chat_ids_by_login.clear()
+                        client._subscribed_chats.clear()
+                        print("Logged out")
+                    continue
 
                 elif not client.authenticated:
                     print(f"Please login first. Use {BOLD}/register{RESET} or {BOLD}/login{RESET}")
