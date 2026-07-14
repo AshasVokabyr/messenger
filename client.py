@@ -1,7 +1,7 @@
 import argparse
 import asyncio
+import html
 import json
-import os
 import sys
 import uuid
 from datetime import datetime
@@ -9,22 +9,11 @@ from datetime import datetime
 import httpx
 import websockets
 
-from prompt_toolkit import PromptSession
-from prompt_toolkit.completion import DynamicCompleter, WordCompleter
+from prompt_toolkit import PromptSession, print_formatted_text
+from prompt_toolkit.completion import WordCompleter
+from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.patch_stdout import patch_stdout
-
-_USE_COLOR = sys.stdout.isatty() and os.environ.get("TERM") != "dumb"
-if _USE_COLOR:
-    CYAN = "\033[96m"
-    GREEN = "\033[92m"
-    YELLOW = "\033[93m"
-    BOLD = "\033[1m"
-    RESET = "\033[0m"
-    DIM = "\033[2m"
-    RED = "\033[91m"
-else:
-    CYAN = GREEN = YELLOW = BOLD = RESET = DIM = RED = ""
 
 
 class MessengerClient:
@@ -46,15 +35,20 @@ class MessengerClient:
     def authenticated(self) -> bool:
         return self.token is not None and self.login_name is not None
 
-    def _prompt(self) -> str:
+    def _prompt(self) -> HTML:
         ctx = self.login_name or ""
         if self.current_chat_id:
             name = self._chat_display_name(self.current_chat_id)
             ctx += "@" + name
-        return f"{BOLD}{ctx}{RESET} > " if ctx else "> "
+        return HTML(f"<b>{ctx}</b> > ") if ctx else HTML("> ")
 
     def _print(self, text: str, end: str = "\n") -> None:
-        print(text, end=end, flush=True)
+        try:
+            print_formatted_text(HTML(text), end=end)
+        except Exception:
+            import re
+            clean = re.sub(r'</?[^>]+>', '', text)
+            print(clean, end=end)
 
     @staticmethod
     def _format_member_list(members: list[dict]) -> str:
@@ -234,8 +228,14 @@ class MessengerClient:
 
     async def _ws_receiver(self, ws) -> None:
         while not self._stop.is_set():
-            msg = await ws.recv()
-            data = json.loads(msg)
+            try:
+                msg = await ws.recv()
+            except websockets.ConnectionClosed:
+                return
+            try:
+                data = json.loads(msg)
+            except json.JSONDecodeError:
+                continue
             t = data.get("type")
 
             if t == "message":
@@ -243,26 +243,26 @@ class MessengerClient:
                 ts = datetime.fromisoformat(d["created_at"]).strftime("%H:%M:%S")
                 sender = d.get("sender_login", "unknown")
                 is_me = sender == self.login_name
-                color = GREEN if is_me else YELLOW
-                self._print(f"[{ts}] {color}{sender}{RESET}: {d['content']}")
+                color = "ansigreen" if is_me else "ansiyellow"
+                self._print(f"[{ts}] <{color}>{sender}</{color}>: {html.escape(d['content'])}")
 
             elif t == "joined":
                 cid = data["chat_id"]
                 self._subscribed_chats.add(cid)
                 name = self._chat_display_name(cid)
-                self._print(f"{DIM}Joined {name}{RESET}")
+                self._print(f"<i>Joined {name}</i>")
 
             elif t == "left":
                 cid = data["chat_id"]
                 self._subscribed_chats.discard(cid)
                 name = self._chat_display_name(cid)
-                self._print(f"{DIM}Left {name}{RESET}")
+                self._print(f"<i>Left {name}</i>")
 
             elif t == "ping":
                 pass
 
             elif t == "error":
-                self._print(f"{RED}WS error: {data.get('detail', '')}{RESET}")
+                self._print(f"<ansired>WS error: {html.escape(data.get('detail', ''))}</ansired>")
 
     async def ws_receive_loop(self) -> None:
         while not self._stop.is_set():
@@ -273,20 +273,26 @@ class MessengerClient:
 
                     send_task = asyncio.create_task(self._ws_sender(ws))
                     recv_task = asyncio.create_task(self._ws_receiver(ws))
-                    done, pending = await asyncio.wait(
-                        [send_task, recv_task],
-                        return_when=asyncio.FIRST_EXCEPTION,
-                    )
-                    for task in pending:
-                        task.cancel()
-                    for task in done:
-                        try:
-                            task.result()
-                        except (websockets.ConnectionClosed, asyncio.CancelledError):
-                            pass
+                    try:
+                        done, pending = await asyncio.wait(
+                            [send_task, recv_task],
+                            return_when=asyncio.FIRST_EXCEPTION,
+                        )
+                        for task in pending:
+                            task.cancel()
+                        for task in done:
+                            try:
+                                task.result()
+                            except (websockets.ConnectionClosed, asyncio.CancelledError):
+                                pass
+                    except asyncio.CancelledError:
+                        for t in (send_task, recv_task):
+                            if not t.done():
+                                t.cancel()
+                        raise
             except (websockets.ConnectionClosed, OSError) as e:
                 if not self._stop.is_set():
-                    self._print(f"{DIM}WS disconnected, reconnecting in 3s...{RESET}")
+                    self._print("<i>WS disconnected, reconnecting in 3s...</i>")
                     await asyncio.sleep(3)
 
     async def start_ws(self) -> None:
@@ -307,23 +313,23 @@ class MessengerClient:
         for i, c in enumerate(lst, 1):
             name = self._chat_name(c)
             if c["type"] == "personal":
-                self._print(f"  {i}. {GREEN}{name}{RESET}")
+                self._print(f"  {i}. <ansigreen>{name}</ansigreen>")
             else:
                 members = self._format_member_list(c.get("members", []))
-                self._print(f"  {i}. {CYAN}{name}{RESET} ({members})")
+                self._print(f"  {i}. <ansicyan>{name}</ansicyan> ({members})")
 
     def print_history(self, chat_id: str, msgs: list[dict]) -> None:
         name = self._chat_display_name(chat_id)
         if not msgs:
-            self._print(f"{DIM}No messages in {name}{RESET}")
+            self._print(f"<i>No messages in {name}</i>")
             return
-        self._print(f"{DIM}--- History of {name} ({len(msgs)} messages) ---{RESET}")
+        self._print(f"<i>--- History of {name} ({len(msgs)} messages) ---</i>")
         for m in reversed(msgs):
             ts = datetime.fromisoformat(m["created_at"]).strftime("%H:%M:%S")
             sender = m.get("sender_login", "unknown")
             is_me = sender == self.login_name
-            color = GREEN if is_me else YELLOW
-            self._print(f"  [{ts}] {color}{sender}{RESET}: {m['content']}")
+            color = "ansigreen" if is_me else "ansiyellow"
+            self._print(f"  [{ts}] <{color}>{sender}</{color}>: {html.escape(m['content'])}")
 
 
 _HELP_AUTH = """
@@ -357,11 +363,10 @@ Ref can be: number from /chats, login (for personal chats),
 
 
 async def _reload(client: MessengerClient) -> None:
-    """Refresh state after login / register."""
     try:
         chats = await client.get_chats()
         if chats:
-            print(f"Your chats:")
+            print("Your chats:")
             client.print_chat_list(chats)
         else:
             print("  No chats yet")
@@ -373,9 +378,9 @@ async def interactive_mode(client: MessengerClient) -> None:
     already_auth = client.authenticated
 
     if already_auth:
-        print(f"{BOLD}{client.login_name}{RESET} connected")
+        client._print(f"<b>{client.login_name}</b> connected")
     else:
-        print(f"Not logged in. Use {BOLD}/register{RESET} or {BOLD}/login{RESET}")
+        client._print("Not logged in. Use <b>/register</b> or <b>/login</b>")
 
     if already_auth:
         await _reload(client)
@@ -417,9 +422,9 @@ async def interactive_mode(client: MessengerClient) -> None:
                         if not was_auth:
                             await client.start_ws()
                         await _reload(client)
-                        print(f"Registered and logged in as {GREEN}{parts[1]}{RESET}")
+                        print_formatted_text(HTML(f"Registered and logged in as <ansigreen>{parts[1]}</ansigreen>"))
                     except Exception as e:
-                        print(f"{RED}Error: {e}{RESET}")
+                        print_formatted_text(HTML(f"<ansired>Error: {e}</ansired>"))
 
                 elif cmd == "/login":
                     if len(parts) < 3:
@@ -432,9 +437,9 @@ async def interactive_mode(client: MessengerClient) -> None:
                         if not was_auth:
                             await client.start_ws()
                         await _reload(client)
-                        print(f"Logged in as {GREEN}{parts[1]}{RESET}")
+                        print_formatted_text(HTML(f"Logged in as <ansigreen>{parts[1]}</ansigreen>"))
                     except Exception as e:
-                        print(f"{RED}Error: {e}{RESET}")
+                        print_formatted_text(HTML(f"<ansired>Error: {e}</ansired>"))
 
                 elif cmd == "/logout":
                     if not client.authenticated:
@@ -452,7 +457,7 @@ async def interactive_mode(client: MessengerClient) -> None:
                     continue
 
                 elif not client.authenticated:
-                    print(f"Please login first. Use {BOLD}/register{RESET} or {BOLD}/login{RESET}")
+                    print("Please login first. Use <b>/register</b> or <b>/login</b>")
                     continue
 
                 elif cmd == "/chats":
@@ -463,7 +468,7 @@ async def interactive_mode(client: MessengerClient) -> None:
                         else:
                             print("  No chats")
                     except Exception as e:
-                        print(f"{RED}Error: {e}{RESET}")
+                        print_formatted_text(HTML(f"<ansired>Error: {e}</ansired>"))
 
                 elif cmd == "/join":
                     if len(parts) < 2:
@@ -471,7 +476,7 @@ async def interactive_mode(client: MessengerClient) -> None:
                         continue
                     cid = client.resolve_chat_ref(parts[1])
                     if not cid:
-                        print(f"{RED}Chat not found: {parts[1]}{RESET}")
+                        print_formatted_text(HTML(f"<ansired>Chat not found: {parts[1]}</ansired>"))
                         continue
                     client.current_chat_id = cid
                     await client.ws_send({"action": "join", "chat_id": cid})
@@ -484,7 +489,7 @@ async def interactive_mode(client: MessengerClient) -> None:
                         continue
                     cid = client.resolve_chat_ref(parts[1])
                     if not cid:
-                        print(f"{RED}Chat not found: {parts[1]}{RESET}")
+                        print_formatted_text(HTML(f"<ansired>Chat not found: {parts[1]}</ansired>"))
                         continue
                     if client.current_chat_id == cid:
                         client.current_chat_id = None
@@ -508,18 +513,18 @@ async def interactive_mode(client: MessengerClient) -> None:
                         continue
                     cid = client.resolve_chat_ref(ref)
                     if not cid:
-                        print(f"{RED}Chat not found: {ref}{RESET}")
+                        print_formatted_text(HTML(f"<ansired>Chat not found: {ref}</ansired>"))
                         continue
                     if client.current_chat_id != cid:
                         client.current_chat_id = cid
                         await client.ws_send({"action": "join", "chat_id": cid})
                     name = client._chat_display_name(cid)
-                    print(f"{BOLD}=== {name} ==={RESET}")
+                    print_formatted_text(HTML(f"<b>=== {name} ===</b>"))
                     try:
                         msgs = await client.get_messages(cid, limit)
                         client.print_history(cid, msgs)
                     except Exception as e:
-                        print(f"  {DIM}Could not load history: {e}{RESET}")
+                        print(f"  <i>Could not load history: {e}</i>")
 
                 elif cmd == "/switch":
                     if len(parts) < 2:
@@ -530,13 +535,13 @@ async def interactive_mode(client: MessengerClient) -> None:
                             print("Subscribed chats:")
                             for i, c in enumerate(subscribed, 1):
                                 name = client._chat_name(c)
-                                mark = f" {GREEN}*{RESET}" if c["id"] == client.current_chat_id else ""
-                                print(f"  {i}. {name}{mark}")
+                                mark = f" <ansigreen>*</ansigreen>" if c["id"] == client.current_chat_id else ""
+                                print_formatted_text(HTML(f"  {i}. {name}{mark}"))
                             print("Use /switch <number|name> to switch")
                         continue
                     cid = client.resolve_chat_ref(parts[1])
                     if not cid:
-                        print(f"{RED}Chat not found: {parts[1]}{RESET}")
+                        print_formatted_text(HTML(f"<ansired>Chat not found: {parts[1]}</ansired>"))
                         continue
                     if cid not in client._subscribed_chats:
                         await client.ws_send({"action": "join", "chat_id": cid})
@@ -553,9 +558,9 @@ async def interactive_mode(client: MessengerClient) -> None:
                         user = await client.get_user_by_login(parts[1])
                         chat = await client.create_personal_chat(str(user["id"]))
                         name = client._chat_name(chat)
-                        print(f"Chat with {GREEN}{name}{RESET} ready")
+                        print_formatted_text(HTML(f"Chat with <ansigreen>{name}</ansigreen> ready"))
                     except Exception as e:
-                        print(f"{RED}Error: {e}{RESET}")
+                        print_formatted_text(HTML(f"<ansired>Error: {e}</ansired>"))
 
                 elif cmd == "/group":
                     if len(parts) < 3:
@@ -563,9 +568,9 @@ async def interactive_mode(client: MessengerClient) -> None:
                         continue
                     try:
                         chat = await client.create_group_chat(parts[1], parts[2:])
-                        print(f'Group {CYAN}"{parts[1]}"{RESET} created ({len(parts) - 2} members)')
+                        print_formatted_text(HTML(f'Group <ansicyan>"{parts[1]}"</ansicyan> created ({len(parts) - 2} members)'))
                     except Exception as e:
-                        print(f"{RED}Error: {e}{RESET}")
+                        print_formatted_text(HTML(f"<ansired>Error: {e}</ansired>"))
 
                 elif cmd == "/users":
                     if len(parts) < 2:
@@ -576,7 +581,7 @@ async def interactive_mode(client: MessengerClient) -> None:
                         for u in users:
                             print(f"  {u['login']}")
                     except Exception as e:
-                        print(f"{RED}Error: {e}{RESET}")
+                        print_formatted_text(HTML(f"<ansired>Error: {e}</ansired>"))
 
                 elif cmd == "/messages":
                     limit = 20
@@ -593,7 +598,7 @@ async def interactive_mode(client: MessengerClient) -> None:
                         msgs = await client.get_messages(client.current_chat_id, limit)
                         client.print_history(client.current_chat_id, msgs)
                     except Exception as e:
-                        print(f"{RED}Error: {e}{RESET}")
+                        print_formatted_text(HTML(f"<ansired>Error: {e}</ansired>"))
 
                 elif cmd == "/members":
                     if not client.current_chat_id:
@@ -605,7 +610,7 @@ async def interactive_mode(client: MessengerClient) -> None:
                             tag = " (you)" if m["login"] == client.login_name else ""
                             print(f"  {m['login']}{tag}")
                     except Exception as e:
-                        print(f"{RED}Error: {e}{RESET}")
+                        print_formatted_text(HTML(f"<ansired>Error: {e}</ansired>"))
 
                 elif cmd.startswith("/"):
                     print(f"Unknown command: {cmd}")
@@ -614,7 +619,7 @@ async def interactive_mode(client: MessengerClient) -> None:
                     try:
                         await client.send_message(client.current_chat_id, line)
                     except Exception as e:
-                        print(f"{RED}Error: {e}{RESET}")
+                        print_formatted_text(HTML(f"<ansired>Error: {e}</ansired>"))
                 else:
                     print("No current chat. Use /join, /enter, or /switch first.")
     finally:
