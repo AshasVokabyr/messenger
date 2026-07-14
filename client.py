@@ -69,6 +69,8 @@ class MessengerClient:
     def _cache_chat(self, chat: dict) -> None:
         cid = chat["id"]
         self._chats_cache[cid] = chat
+        if all(c["id"] != cid for c in self._chat_list):
+            self._chat_list.append(chat)
         if chat["type"] == "personal" and self.login_name:
             others = [m["login"] for m in chat.get("members", []) if m["login"] != self.login_name]
             for ol in others:
@@ -348,7 +350,7 @@ _HELP_FULL = """
   /back                    Go to main menu (keep subscriptions)
   /clear                   Clear terminal screen
   /personal <login>        Create personal chat by login
-  /group <name> <id1>...   Create group chat
+  /group <name> <login1>...   Create group chat
   /register <l> <p>        Register a new user
   /login <l> <p>           Log in as existing user
   /logout                  Log out and return to anonymous mode
@@ -504,6 +506,11 @@ async def interactive_mode(client: MessengerClient) -> None:
                         continue
                     if client.current_chat_id == cid:
                         client.current_chat_id = None
+                    if cid not in client._chats_cache:
+                        try:
+                            await client.get_chat(cid)
+                        except Exception:
+                            pass
                     await client.ws_send({"action": "leave", "chat_id": cid})
                     name = client._chat_display_name(cid)
                     print(f"Left {name}")
@@ -539,6 +546,8 @@ async def interactive_mode(client: MessengerClient) -> None:
 
                 elif cmd == "/switch":
                     if len(parts) < 2:
+                        if not client._chat_list:
+                            await client.get_chats()
                         subscribed = [c for c in client._chat_list if c["id"] in client._subscribed_chats]
                         if not subscribed:
                             print("No subscribed chats. Use /join or /enter first.")
@@ -568,6 +577,10 @@ async def interactive_mode(client: MessengerClient) -> None:
                     try:
                         user = await client.get_user_by_login(parts[1])
                         chat = await client.create_personal_chat(str(user["id"]))
+                        cid = chat["id"]
+                        client.current_chat_id = cid
+                        await client.ws_send({"action": "join", "chat_id": cid})
+                        client._subscribed_chats.add(cid)
                         name = client._chat_name(chat)
                         print_formatted_text(HTML(f"Chat with <ansigreen>{name}</ansigreen> ready"))
                     except Exception as e:
@@ -583,6 +596,10 @@ async def interactive_mode(client: MessengerClient) -> None:
                             user = await client.get_user_by_login(name)
                             user_ids.append(str(user["id"]))
                         chat = await client.create_group_chat(parts[1], user_ids)
+                        cid = chat["id"]
+                        client.current_chat_id = cid
+                        await client.ws_send({"action": "join", "chat_id": cid})
+                        client._subscribed_chats.add(cid)
                         print_formatted_text(HTML(f'Group <ansicyan>"{parts[1]}"</ansicyan> created ({len(user_ids)} members)'))
                     except Exception as e:
                         print_formatted_text(HTML(f"<ansired>Error: {e}</ansired>"))
