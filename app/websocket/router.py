@@ -22,7 +22,7 @@ async def _heartbeat(ws: WebSocket) -> None:
     try:
         while True:
             await asyncio.sleep(30)
-            await ws.send({"type": "websocket.ping"})
+            await ws.send_json({"type": "ping"})
     except asyncio.CancelledError:
         pass
 

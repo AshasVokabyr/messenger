@@ -255,3 +255,54 @@ class TestWebSocketErrors:
             data = ws.receive_json()
             assert data["type"] == "error"
             assert "unknown action" in data["detail"].lower()
+
+
+@pytest.mark.usefixtures("_reset_db")
+class TestRealtimeDelivery:
+    def test_message_delivered_via_websocket(self, tc_session, mock_kafka):
+        resp = tc_session.post("/auth/register", json={"login": "rt_a", "password": "secret123"})
+        token_a = resp.json()["access_token"]
+        user_a_id = uuid.UUID(decode_access_token(token_a)["sub"])
+
+        resp = tc_session.post("/auth/register", json={"login": "rt_b", "password": "secret123"})
+        token_b = resp.json()["access_token"]
+        user_b_id = uuid.UUID(decode_access_token(token_b)["sub"])
+
+        resp = tc_session.post(
+            f"/chats/personal/{user_b_id}",
+            headers={"Authorization": f"Bearer {token_a}"},
+        )
+        chat_id = resp.json()["id"]
+
+        from unittest.mock import AsyncMock
+
+        with (
+            patch("app.chats.router.publish_event", new_callable=AsyncMock) as mock_publish,
+            tc_session.websocket_connect(f"/ws?token={token_b}") as ws_b,
+        ):
+            ws_b.send_json({"action": "join", "chat_id": chat_id})
+            join_resp = ws_b.receive_json()
+            assert join_resp["type"] == "joined"
+
+            rest_resp = tc_session.post(
+                f"/chats/{chat_id}/messages",
+                json={"content": "e2e hello"},
+                headers={"Authorization": f"Bearer {token_a}"},
+            )
+            assert rest_resp.status_code == 201
+            msg_id = rest_resp.json()["id"]
+
+            mock_publish.assert_awaited_once()
+            _, kwargs = mock_publish.call_args
+            payload = kwargs["payload"]
+
+            from app.kafka.handlers import handle_message_event
+            import asyncio
+            asyncio.run(handle_message_event(payload))
+
+            ws_data = ws_b.receive_json()
+            assert ws_data["type"] == "message"
+            assert ws_data["data"]["id"] == msg_id
+            assert ws_data["data"]["content"] == "e2e hello"
+            assert ws_data["data"]["chat_id"] == str(chat_id)
+            assert ws_data["data"]["user_id"] == str(user_a_id)

@@ -10,6 +10,7 @@ class MessageResponse(BaseModel):
     user_id: uuid.UUID
     content: str
     created_at: datetime
+    sender_login: str
 
     model_config = {"from_attributes": True}
 
