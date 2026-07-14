@@ -26,6 +26,7 @@ class Message(Base):
     )
 
     chat = relationship("Chat", back_populates="messages")
+    user = relationship("User")
 
     __table_args__ = (
         Index("ix_messages_chat_created", "chat_id", created_at.desc()),

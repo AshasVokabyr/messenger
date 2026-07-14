@@ -372,7 +372,14 @@ async def send_chat_message(
         },
     )
 
-    return message
+    return MessageResponse(
+        id=message.id,
+        chat_id=message.chat_id,
+        user_id=message.user_id,
+        content=message.content,
+        created_at=message.created_at,
+        sender_login=current_user.login,
+    )
 
 
 @router.get("/{chat_id}/messages/search", response_model=list[MessageResponse])
@@ -398,6 +405,7 @@ async def search_chat_messages(
     safe_q = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     stmt = (
         select(Message)
+        .options(selectinload(Message.user))
         .where(
             Message.chat_id == chat_id,
             Message.content.ilike(f"%{safe_q}%", escape="\\"),
@@ -406,7 +414,15 @@ async def search_chat_messages(
         .limit(limit)
     )
     result = await db.execute(stmt)
-    return result.scalars().all()
+    messages = result.scalars().all()
+    return [
+        MessageResponse(
+            id=m.id, chat_id=m.chat_id, user_id=m.user_id,
+            content=m.content, created_at=m.created_at,
+            sender_login=m.user.login,
+        )
+        for m in messages
+    ]
 
 
 @router.get("/{chat_id}/messages", response_model=MessageCursorResponse)
@@ -430,7 +446,7 @@ async def get_chat_messages_cursor(
         )
 
     base_order = Message.created_at.desc()
-    stmt = select(Message).where(Message.chat_id == chat_id)
+    stmt = select(Message).options(selectinload(Message.user)).where(Message.chat_id == chat_id)
 
     if before is not None:
         cursor_result = await db.execute(
@@ -451,5 +467,13 @@ async def get_chat_messages_cursor(
     stmt = stmt.order_by(base_order, Message.id.desc()).limit(limit)
 
     messages = (await db.execute(stmt)).scalars().all()
+    items = [
+        MessageResponse(
+            id=m.id, chat_id=m.chat_id, user_id=m.user_id,
+            content=m.content, created_at=m.created_at,
+            sender_login=m.user.login,
+        )
+        for m in messages
+    ]
     next_cursor = str(messages[-1].id) if len(messages) == limit else None
-    return MessageCursorResponse(items=messages, next_cursor=next_cursor)
+    return MessageCursorResponse(items=items, next_cursor=next_cursor)

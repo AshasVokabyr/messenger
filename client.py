@@ -2,6 +2,7 @@ import argparse
 import asyncio
 import html
 import json
+import re
 import sys
 import uuid
 from datetime import datetime
@@ -46,7 +47,6 @@ class MessengerClient:
         try:
             print_formatted_text(HTML(text), end=end)
         except Exception:
-            import re
             clean = re.sub(r'</?[^>]+>', '', text)
             print(clean, end=end)
 
@@ -79,6 +79,7 @@ class MessengerClient:
             return ["/help", "/register", "/login", "/quit", "/exit"]
         words = [
             "/help", "/chats", "/join", "/leave", "/enter", "/switch",
+            "/back", "/clear",
             "/personal", "/group", "/register", "/login", "/logout",
             "/users", "/messages", "/members", "/quit", "/exit",
         ]
@@ -89,8 +90,6 @@ class MessengerClient:
 
     def resolve_chat_ref(self, ref: str) -> str | None:
         if not ref:
-            return None
-        if ref == self.login_name:
             return None
         if ref.isdigit():
             idx = int(ref) - 1
@@ -346,6 +345,8 @@ _HELP_FULL = """
   /leave <ref>             Unsubscribe from chat
   /enter <ref> [N]         Join + show last N messages
   /switch [ref]            Switch current chat (list if no ref)
+  /back                    Go to main menu (keep subscriptions)
+  /clear                   Clear terminal screen
   /personal <login>        Create personal chat by login
   /group <name> <id1>...   Create group chat
   /register <l> <p>        Register a new user
@@ -470,6 +471,16 @@ async def interactive_mode(client: MessengerClient) -> None:
                     except Exception as e:
                         print_formatted_text(HTML(f"<ansired>Error: {e}</ansired>"))
 
+                elif cmd == "/back":
+                    if not client.current_chat_id:
+                        print("Already in main menu")
+                    else:
+                        client.current_chat_id = None
+                        print("Back to main menu")
+
+                elif cmd == "/clear":
+                    print("\033[2J\033[H", end="")
+
                 elif cmd == "/join":
                     if len(parts) < 2:
                         print("Usage: /join <ref>")
@@ -564,11 +575,15 @@ async def interactive_mode(client: MessengerClient) -> None:
 
                 elif cmd == "/group":
                     if len(parts) < 3:
-                        print("Usage: /group <name> <user_id1> [user_id2 ...]")
+                        print("Usage: /group <name> <login1> [login2 ...]")
                         continue
                     try:
-                        chat = await client.create_group_chat(parts[1], parts[2:])
-                        print_formatted_text(HTML(f'Group <ansicyan>"{parts[1]}"</ansicyan> created ({len(parts) - 2} members)'))
+                        user_ids = []
+                        for name in parts[2:]:
+                            user = await client.get_user_by_login(name)
+                            user_ids.append(str(user["id"]))
+                        chat = await client.create_group_chat(parts[1], user_ids)
+                        print_formatted_text(HTML(f'Group <ansicyan>"{parts[1]}"</ansicyan> created ({len(user_ids)} members)'))
                     except Exception as e:
                         print_formatted_text(HTML(f"<ansired>Error: {e}</ansired>"))
 
@@ -579,7 +594,7 @@ async def interactive_mode(client: MessengerClient) -> None:
                     try:
                         users = await client.search_users(parts[1])
                         for u in users:
-                            print(f"  {u['login']}")
+                            print(f"  {u['id']}  {u['login']}")
                     except Exception as e:
                         print_formatted_text(HTML(f"<ansired>Error: {e}</ansired>"))
 
