@@ -201,6 +201,16 @@ class MessengerClient:
                 return chat
             raise RuntimeError(f"Failed to create group chat ({resp.status_code}): {resp.json().get('detail', '')}")
 
+    async def leave_chat(self, chat_id: str) -> dict:
+        async with httpx.AsyncClient() as c:
+            resp = await c.post(
+                f"{self.base_url}/chats/{chat_id}/leave",
+                headers=await self._auth_header(),
+            )
+            if resp.status_code == 200:
+                return resp.json()
+            raise RuntimeError(f"Leave failed ({resp.status_code}): {resp.json().get('detail', '')}")
+
     async def send_message(self, chat_id: str, content: str) -> dict:
         async with httpx.AsyncClient() as c:
             resp = await c.post(
@@ -354,7 +364,7 @@ _HELP_FULL = """
   /help                    Show this help
   /chats                   List your chats (numbered)
   /join <ref>              Subscribe to chat + set as current
-  /leave <ref>             Unsubscribe from chat
+  /leave <ref>             Leave chat (remove yourself from participants)
   /enter <ref> [N]         Join + show last N messages
   /switch [ref]            Switch current chat (list if no ref)
   /back                    Go to main menu (keep subscriptions)
@@ -516,14 +526,14 @@ async def interactive_mode(client: MessengerClient) -> None:
                         continue
                     if client.current_chat_id == cid:
                         client.current_chat_id = None
-                    if cid not in client._chats_cache:
-                        try:
-                            await client.get_chat(cid)
-                        except Exception:
-                            pass
-                    await client.ws_send({"action": "leave", "chat_id": cid})
-                    name = client._chat_display_name(cid)
-                    print(f"Left {name}")
+                    try:
+                        result = await client.leave_chat(cid)
+                        client._subscribed_chats.discard(cid)
+                        client._chats_cache.pop(cid, None)
+                        client._chat_list = [c for c in client._chat_list if c["id"] != cid]
+                        print(result.get("detail", f"Left {client._chat_display_name(cid)}"))
+                    except Exception as e:
+                        print_formatted_text(HTML(f"<ansired>Error: {e}</ansired>"))
 
                 elif cmd == "/enter":
                     limit = 20
