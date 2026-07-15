@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "messenger"
+version = "0.1.0"
+description = "Real-time messenger MVP"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.109.0",
+    "uvicorn[standard]>=0.27.0",
+    "sqlalchemy>=2.0.25",
+    "asyncpg>=0.29.0",
+    "aiokafka>=0.10.0",
+    "pyjwt>=2.8.0",
+    "bcrypt>=4.0.0",
+    "pydantic-settings>=2.1.0",
+    "websockets>=12.0",
+    "python-json-logger>=2.0.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "strict"
+testpaths = ["tests"]
