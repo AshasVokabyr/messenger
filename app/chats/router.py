@@ -19,6 +19,7 @@ from app.models.chat import Chat, ChatType
 from app.models.chat_participant import ChatParticipant, ParticipantRole
 from app.models.message import Message
 from app.models.user import User
+from app.websocket.manager import manager
 
 router = APIRouter(prefix="/chats", tags=["chats"])
 
@@ -477,3 +478,82 @@ async def get_chat_messages_cursor(
     ]
     next_cursor = str(messages[-1].id) if len(messages) == limit else None
     return MessageCursorResponse(items=items, next_cursor=next_cursor)
+
+
+@router.post("/{chat_id}/leave")
+async def leave_chat(
+    chat_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    result = await db.execute(
+        select(Chat)
+        .where(Chat.id == chat_id)
+        .options(selectinload(Chat.participants))
+    )
+    chat = result.scalar_one_or_none()
+    if not chat:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+
+    me = next((p for p in chat.participants if p.user_id == current_user.id), None)
+    if not me:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="You are not a participant")
+
+    remaining = [p for p in chat.participants if p.user_id != current_user.id]
+
+    if chat.type == ChatType.personal or not remaining:
+        other = remaining[0] if remaining else None
+        await db.delete(chat)
+        await db.commit()
+        manager.unsubscribe(current_user.id, chat_id)
+        if other:
+            manager.unsubscribe(other.user_id, chat_id)
+            await manager.send_to_user(other.user_id, {
+                "type": "chat_deleted",
+                "chat_id": str(chat_id),
+            })
+        await publish_event("chat_events", str(chat_id), {
+            "type": "chat_deleted",
+            "chat_id": str(chat_id),
+        })
+        return {"detail": "Chat deleted"}
+
+    await db.delete(me)
+    await db.commit()
+    manager.unsubscribe(current_user.id, chat_id)
+    await publish_event("chat_events", str(chat_id), {
+        "type": "participant_left",
+        "chat_id": str(chat_id),
+        "user_id": str(current_user.id),
+    })
+    return {"detail": "Left the chat"}
+
+
+@router.delete("/{chat_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_chat(
+    chat_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    result = await db.execute(
+        select(Chat)
+        .where(Chat.id == chat_id)
+        .options(selectinload(Chat.participants))
+    )
+    chat = result.scalar_one_or_none()
+    if not chat:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+
+    me = next((p for p in chat.participants if p.user_id == current_user.id), None)
+    if me is None or me.role != ParticipantRole.admin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only admins can delete chats")
+
+    for p in chat.participants:
+        manager.unsubscribe(p.user_id, chat_id)
+
+    await db.delete(chat)
+    await db.commit()
+    await publish_event("chat_events", str(chat_id), {
+        "type": "chat_deleted",
+        "chat_id": str(chat_id),
+    })

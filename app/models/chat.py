@@ -32,5 +32,5 @@ class Chat(Base):
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
 
-    participants = relationship("ChatParticipant", back_populates="chat")
-    messages = relationship("Message", back_populates="chat")
+    participants = relationship("ChatParticipant", back_populates="chat", cascade="all, delete")
+    messages = relationship("Message", back_populates="chat", cascade="all, delete")

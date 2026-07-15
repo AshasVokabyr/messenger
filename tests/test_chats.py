@@ -361,3 +361,187 @@ class TestParticipants:
             assert kwargs["key"] == str(chat_id)
             assert kwargs["payload"]["type"] == "participant_removed"
             assert kwargs["payload"]["user_id"] == str(user_b_id)
+
+
+class TestLeaveChat:
+    async def _register(self, client: AsyncClient, login: str):
+        resp = await client.post(
+            "/auth/register",
+            json={"login": login, "password": "secret123"},
+        )
+        data = resp.json()
+        payload = decode_access_token(data["access_token"])
+        user_id = uuid.UUID(payload["sub"])
+        return data["access_token"], user_id
+
+    async def _create_group(self, client: AsyncClient, token: str, participant_ids: list[str]):
+        resp = await client.post(
+            "/chats/group",
+            json={"name": "Test Group", "participant_ids": participant_ids},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        return resp
+
+    @pytest.mark.asyncio
+    async def test_leave_group_success(self, client: AsyncClient):
+        token1, user1_id = await self._register(client, "user_a")
+        token2, user_b_id = await self._register(client, "user_b")
+
+        chat = await self._create_group(client, token1, [str(user_b_id)])
+        chat_id = chat.json()["id"]
+
+        resp = await client.post(
+            f"/chats/{chat_id}/leave",
+            headers={"Authorization": f"Bearer {token1}"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["detail"] == "Left the chat"
+
+        resp = await client.get(
+            f"/chats/{chat_id}",
+            headers={"Authorization": f"Bearer {token2}"},
+        )
+        assert resp.status_code == 200
+        member_ids = [m["id"] for m in resp.json()["members"]]
+        assert str(user1_id) not in member_ids
+
+    @pytest.mark.asyncio
+    async def test_leave_last_participant_deletes_group_chat(self, client: AsyncClient):
+        token1, _ = await self._register(client, "user_a")
+        token2, user_b_id = await self._register(client, "user_b")
+
+        chat = await self._create_group(client, token1, [str(user_b_id)])
+        chat_id = chat.json()["id"]
+
+        resp = await client.post(
+            f"/chats/{chat_id}/leave",
+            headers={"Authorization": f"Bearer {token2}"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["detail"] == "Left the chat"
+
+        resp = await client.post(
+            f"/chats/{chat_id}/leave",
+            headers={"Authorization": f"Bearer {token1}"},
+        )
+        assert resp.status_code == 200
+        assert "deleted" in resp.json()["detail"]
+
+        resp = await client.get(
+            f"/chats/{chat_id}",
+            headers={"Authorization": f"Bearer {token1}"},
+        )
+        assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_leave_personal_deletes_chat(self, client: AsyncClient):
+        token1, _ = await self._register(client, "user_a")
+        _, user_b_id = await self._register(client, "user_b")
+
+        resp = await client.post(
+            f"/chats/personal/{user_b_id}",
+            headers={"Authorization": f"Bearer {token1}"},
+        )
+        chat_id = resp.json()["id"]
+
+        resp = await client.post(
+            f"/chats/{chat_id}/leave",
+            headers={"Authorization": f"Bearer {token1}"},
+        )
+        assert resp.status_code == 200
+        assert "deleted" in resp.json()["detail"]
+
+        resp = await client.get(
+            f"/chats/{chat_id}",
+            headers={"Authorization": f"Bearer {token1}"},
+        )
+        assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_leave_non_member_404(self, client: AsyncClient):
+        token1, _ = await self._register(client, "user_a")
+        _, user_b_id = await self._register(client, "user_b")
+        token3, _ = await self._register(client, "user_c")
+
+        chat = await self._create_group(client, token1, [str(user_b_id)])
+        chat_id = chat.json()["id"]
+
+        resp = await client.post(
+            f"/chats/{chat_id}/leave",
+            headers={"Authorization": f"Bearer {token3}"},
+        )
+        assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_leave_unauthorized(self, client: AsyncClient):
+        resp = await client.post(f"/chats/{uuid.uuid4()}/leave")
+        assert resp.status_code == 401
+
+
+class TestDeleteChat:
+    async def _register(self, client: AsyncClient, login: str):
+        resp = await client.post(
+            "/auth/register",
+            json={"login": login, "password": "secret123"},
+        )
+        data = resp.json()
+        payload = decode_access_token(data["access_token"])
+        user_id = uuid.UUID(payload["sub"])
+        return data["access_token"], user_id
+
+    async def _create_group(self, client: AsyncClient, token: str, participant_ids: list[str]):
+        resp = await client.post(
+            "/chats/group",
+            json={"name": "Test Group", "participant_ids": participant_ids},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        return resp
+
+    @pytest.mark.asyncio
+    async def test_delete_chat_as_admin(self, client: AsyncClient):
+        token1, _ = await self._register(client, "user_a")
+        _, user_b_id = await self._register(client, "user_b")
+
+        chat = await self._create_group(client, token1, [str(user_b_id)])
+        chat_id = chat.json()["id"]
+
+        resp = await client.delete(
+            f"/chats/{chat_id}",
+            headers={"Authorization": f"Bearer {token1}"},
+        )
+        assert resp.status_code == 204
+
+        resp = await client.get(
+            f"/chats/{chat_id}",
+            headers={"Authorization": f"Bearer {token1}"},
+        )
+        assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_delete_chat_as_member_403(self, client: AsyncClient):
+        token1, _ = await self._register(client, "user_a")
+        token2, user_b_id = await self._register(client, "user_b")
+
+        chat = await self._create_group(client, token1, [str(user_b_id)])
+        chat_id = chat.json()["id"]
+
+        resp = await client.delete(
+            f"/chats/{chat_id}",
+            headers={"Authorization": f"Bearer {token2}"},
+        )
+        assert resp.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_delete_chat_not_found(self, client: AsyncClient):
+        token1, _ = await self._register(client, "user_a")
+
+        resp = await client.delete(
+            f"/chats/{uuid.uuid4()}",
+            headers={"Authorization": f"Bearer {token1}"},
+        )
+        assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_delete_chat_unauthorized(self, client: AsyncClient):
+        resp = await client.delete(f"/chats/{uuid.uuid4()}")
+        assert resp.status_code == 401
