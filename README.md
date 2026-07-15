@@ -67,20 +67,23 @@ python client.py interactive
 Внутри interactive-режима:
 
 ```
-> /register alice secret123    # регистрация
-> /personal bob                # создать личный чат с bob
-> /enter bob                   # войти в чат + показать историю
-> Привет, Боб!                 # отправить сообщение
-> /back                        # выйти из чата в меню
-> /chats                       # список чатов
-> /group group1 bob alice      # создать групповой чат
-> /enter group1                # войти в групповой чат
-> /invite group1 eve           # добавить участника
-> /messages 10                 # показать последние 10 сообщений
-> /search привет               # глобальный поиск
-> /leave group1                # покинуть групповой чат
-> /delete group1               # удалить чат (только админ)
-> /help                        # все команды
+> /register alice secret123       # регистрация
+> /personal bob                   # создать личный чат с bob
+> /enter bob                      # войти в чат + показать историю
+> Привет, Боб!                    # отправить сообщение
+> /back                           # выйти из чата в меню
+> /chats                          # список чатов
+> /group group1 bob eve           # создать групповой чат
+> /enter group1                   # войти в групповой чат
+> /invite group1 eve              # добавить участника
+> /messages 10                    # показать последние 10 сообщений
+> /search привет                  # глобальный поиск
+> /leave group1                   # покинуть групповой чат
+> /del_chat group1                # удалить чат (только админ)
+> /members                        # список участников с ролями
+> /role group1 eve moderator      # назначить модератора (админ)
+> /del_message 3                  # удалить сообщение №3
+> /help                           # все команды
 ```
 
 ### 5. Работа через curl
@@ -212,11 +215,13 @@ messenger/
 | POST | `/chats/group` | Создать групповой чат |
 | POST | `/chats/{chat_id}/participants` | Добавить участников (админ) |
 | DELETE | `/chats/{chat_id}/participants/{user_id}` | Удалить участника (админ) |
+| PATCH | `/chats/{chat_id}/participants/{user_id}/role` | Сменить роль участника (админ) |
 | POST | `/chats/{chat_id}/leave` | Выйти из чата |
 | DELETE | `/chats/{chat_id}` | Удалить чат (админ) |
 | POST | `/chats/{chat_id}/messages` | Отправить сообщение |
 | GET | `/chats/{chat_id}/messages` | История сообщений (пагинация) |
 | GET | `/chats/{chat_id}/messages/search?q=` | Поиск по сообщениям в чате |
+| DELETE | `/chats/{chat_id}/messages/{message_id}` | Удалить сообщение |
 | GET | `/messages/search?q=` | Глобальный поиск по сообщениям |
 | WS | `/ws?token=` | WebSocket для real-time |
 | GET | `/health` | Health check |
@@ -257,7 +262,8 @@ pytest
   /invite <ref> <login>    Add participant to chat
   /kick <ref> <login>      Remove participant (admin only)
   /leave <ref>             Leave chat (remove yourself from participants)
-  /delete <ref>            Delete chat (admin only)
+  /del_chat <ref>          Delete chat (admin only)
+  /role <ref> <l> <r>      Set role (moderator|member) of participant (admin only)
 
 ── Navigation ──────────────────────────────
   /chats                   List your chats (numbered)
@@ -268,13 +274,29 @@ pytest
 ── Messages ────────────────────────────────
   /messages [N]            Show last N messages in current chat
   /search <query>          Search messages across all your chats
+  /del_message <N>         Delete message N from last /messages output
   <any text>               Send message to current chat
 
 ── Info ────────────────────────────────────
   /help                    Show this help
   /users <query>           Search users by login
-  /members                 Show members of current chat
+  /members                 Show members of current chat (with roles)
   /clear                   Clear terminal screen
 ```
 
 `<ref>` может быть: номер из `/chats`, логин (для личных чатов), имя чата или UUID.
+
+## Роли и права доступа
+
+Система ролей на уровне участников группового чата:
+
+| Роль | Права |
+|---|---|
+| `member` | Чтение и отправка сообщений, удаление своих сообщений |
+| `moderator` | Всё что `member` + удаление любых сообщений в чате |
+| `admin` | Всё что `moderator` + управление участниками (добавление, удаление, смена ролей), удаление чата |
+
+В личных чатах все участники имеют роль `member`, управление участниками недоступно.
+
+Просмотр ролей: `/members` в чате.
+Назначение модератора: `/role <ref> <login> moderator` (только админ).

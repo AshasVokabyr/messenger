@@ -10,10 +10,10 @@ logger = logging.getLogger(__name__)
 async def handle_message_event(payload: dict) -> None:
     try:
         chat_id = uuid.UUID(payload["chat_id"])
-        await manager.broadcast_to_chat(chat_id, {"type": "message", "data": payload})
+        event_type = payload.get("type", "message")
+        await manager.broadcast_to_chat(chat_id, {"type": event_type, "data": payload})
         logger.info(
-            "Broadcast message event: chat_id=%s user_id=%s",
-            chat_id, payload.get("user_id"),
+            "Broadcast message event: type=%s chat_id=%s", event_type, chat_id,
         )
     except Exception:
         logger.exception("Failed to handle message event: %s", payload)

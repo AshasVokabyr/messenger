@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 class ChatMemberResponse(BaseModel):
     id: uuid.UUID
     login: str
+    role: str
 
 
 class ChatResponse(BaseModel):
@@ -26,3 +27,7 @@ class ChatCreateGroupRequest(BaseModel):
 
 class AddParticipantsRequest(BaseModel):
     user_ids: list[uuid.UUID]
+
+
+class RoleChangeRequest(BaseModel):
+    role: str = Field(pattern=r"^(moderator|member)$")
