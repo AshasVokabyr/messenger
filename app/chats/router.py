@@ -11,6 +11,7 @@ from app.chats.schemas import (
     ChatCreateGroupRequest,
     ChatMemberResponse,
     ChatResponse,
+    RoleChangeRequest,
 )
 from app.db import get_db
 from app.kafka.producer import publish_event
@@ -37,7 +38,7 @@ async def _build_chat_response(chat_id: uuid.UUID, db: AsyncSession) -> ChatResp
         type=chat.type.value,
         created_at=chat.created_at,
         members=[
-            ChatMemberResponse(id=p.user.id, login=p.user.login)
+            ChatMemberResponse(id=p.user.id, login=p.user.login, role=p.role.value)
             for p in chat.participants
         ],
     )
@@ -178,10 +179,10 @@ async def list_chats(
             name=chat.name,
             type=chat.type.value,
             created_at=chat.created_at,
-            members=[
-                ChatMemberResponse(id=p.user.id, login=p.user.login)
-                for p in chat.participants
-            ],
+        members=[
+            ChatMemberResponse(id=p.user.id, login=p.user.login, role=p.role.value)
+            for p in chat.participants
+        ],
         )
         for chat in chats
     ]
@@ -210,7 +211,7 @@ async def get_chat(
         type=chat.type.value,
         created_at=chat.created_at,
         members=[
-            ChatMemberResponse(id=p.user.id, login=p.user.login)
+            ChatMemberResponse(id=p.user.id, login=p.user.login, role=p.role.value)
             for p in chat.participants
         ],
     )
@@ -334,6 +335,49 @@ async def remove_participant(
     )
 
     return None
+
+
+@router.patch("/{chat_id}/participants/{user_id}/role", response_model=ChatResponse)
+async def change_participant_role(
+    chat_id: uuid.UUID,
+    user_id: uuid.UUID,
+    body: RoleChangeRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    chat = await _require_admin(chat_id, current_user.id, db)
+
+    target = next(
+        (p for p in chat.participants if p.user_id == user_id), None
+    )
+    if target is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User is not a participant of this chat",
+        )
+
+    if target.role == ParticipantRole.admin:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot change role of an admin",
+        )
+
+    target.role = ParticipantRole(body.role)
+    await db.commit()
+    db.expire(chat)
+
+    await publish_event(
+        topic="chat_events",
+        key=str(chat_id),
+        payload={
+            "type": "participant_role_changed",
+            "chat_id": str(chat_id),
+            "user_id": str(user_id),
+            "role": body.role,
+        },
+    )
+
+    return await _build_chat_response(chat_id, db)
 
 
 @router.post("/{chat_id}/messages", response_model=MessageResponse, status_code=status.HTTP_201_CREATED)
@@ -478,6 +522,61 @@ async def get_chat_messages_cursor(
     ]
     next_cursor = str(messages[-1].id) if len(messages) == limit else None
     return MessageCursorResponse(items=items, next_cursor=next_cursor)
+
+
+@router.delete(
+    "/{chat_id}/messages/{message_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_chat_message(
+    chat_id: uuid.UUID,
+    message_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    stmt = (
+        select(Message.id, Message.user_id, ChatParticipant.role)
+        .join(ChatParticipant, ChatParticipant.chat_id == Message.chat_id)
+        .where(
+            ChatParticipant.user_id == current_user.id,
+            Message.id == message_id,
+            Message.chat_id == chat_id,
+        )
+    )
+    result = await db.execute(stmt)
+    row = result.one_or_none()
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Message not found",
+        )
+
+    _, author_id, role = row
+    can_delete = (
+        author_id == current_user.id
+        or role == ParticipantRole.moderator
+        or role == ParticipantRole.admin
+    )
+    if not can_delete:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You cannot delete this message",
+        )
+
+    msg_result = await db.execute(select(Message).where(Message.id == message_id))
+    msg = msg_result.scalar_one()
+    await db.delete(msg)
+    await db.commit()
+
+    await publish_event(
+        topic="message_events",
+        key=str(chat_id),
+        payload={
+            "type": "message_deleted",
+            "chat_id": str(chat_id),
+            "message_id": str(message_id),
+        },
+    )
 
 
 @router.post("/{chat_id}/leave")

@@ -404,3 +404,180 @@ class TestSearchMessages:
             headers={"Authorization": f"Bearer {token1}"},
         )
         assert resp.status_code == 422
+
+
+class TestDeleteMessage:
+    async def _register(self, client: AsyncClient, login: str):
+        resp = await client.post(
+            "/auth/register",
+            json={"login": login, "password": "secret123"},
+        )
+        data = resp.json()
+        from app.auth.utils import decode_access_token
+        payload = decode_access_token(data["access_token"])
+        user_id = uuid.UUID(payload["sub"])
+        return data["access_token"], user_id
+
+    async def _create_group(self, client, token, participant_ids, name="Group"):
+        resp = await client.post(
+            "/chats/group",
+            json={"name": name, "participant_ids": participant_ids},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        return resp
+
+    async def _send_msg(self, client, token, chat_id, content):
+        resp = await client.post(
+            f"/chats/{chat_id}/messages",
+            json={"content": content},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        return resp
+
+    async def _set_role(self, user_id, chat_id, role):
+        from sqlalchemy import select
+        from tests.conftest import test_async_session
+        from app.models.chat_participant import ChatParticipant, ParticipantRole
+        uid = uuid.UUID(str(user_id)) if not isinstance(user_id, uuid.UUID) else user_id
+        cid = uuid.UUID(chat_id) if not isinstance(chat_id, uuid.UUID) else chat_id
+        async with test_async_session() as session:
+            result = await session.execute(
+                select(ChatParticipant).where(
+                    ChatParticipant.chat_id == cid,
+                    ChatParticipant.user_id == uid,
+                )
+            )
+            participant = result.scalar_one()
+            participant.role = ParticipantRole(role)
+            await session.commit()
+
+    @pytest.mark.asyncio
+    async def test_author_deletes_own_message(self, client: AsyncClient):
+        token1, user1_id = await self._register(client, "user_a")
+        _, user_b_id = await self._register(client, "user_b")
+
+        chat = await self._create_group(client, token1, [str(user_b_id)])
+        chat_id = chat.json()["id"]
+
+        msg = await self._send_msg(client, token1, chat_id, "hello")
+        msg_id = msg.json()["id"]
+
+        resp = await client.delete(
+            f"/chats/{chat_id}/messages/{msg_id}",
+            headers={"Authorization": f"Bearer {token1}"},
+        )
+        assert resp.status_code == 204
+
+    @pytest.mark.asyncio
+    async def test_member_cannot_delete_others_message(self, client: AsyncClient):
+        token1, _ = await self._register(client, "user_a")
+        token2, user_b_id = await self._register(client, "user_b")
+
+        chat = await self._create_group(client, token1, [str(user_b_id)])
+        chat_id = chat.json()["id"]
+
+        msg = await self._send_msg(client, token1, chat_id, "hello")
+        msg_id = msg.json()["id"]
+
+        resp = await client.delete(
+            f"/chats/{chat_id}/messages/{msg_id}",
+            headers={"Authorization": f"Bearer {token2}"},
+        )
+        assert resp.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_moderator_deletes_any_message(self, client: AsyncClient):
+        token1, _ = await self._register(client, "user_a")
+        token2, user_b_id = await self._register(client, "user_b")
+        _, user_c_id = await self._register(client, "user_c")
+
+        chat = await self._create_group(client, token1, [str(user_b_id), str(user_c_id)])
+        chat_id = chat.json()["id"]
+
+        await self._set_role(user_b_id, chat_id, "moderator")
+
+        msg = await self._send_msg(client, token1, chat_id, "hello")
+        msg_id = msg.json()["id"]
+
+        resp = await client.delete(
+            f"/chats/{chat_id}/messages/{msg_id}",
+            headers={"Authorization": f"Bearer {token2}"},
+        )
+        assert resp.status_code == 204
+
+    @pytest.mark.asyncio
+    async def test_admin_deletes_any_message(self, client: AsyncClient):
+        token1, _ = await self._register(client, "user_a")
+        token2, user_b_id = await self._register(client, "user_b")
+
+        chat = await self._create_group(client, token1, [str(user_b_id)])
+        chat_id = chat.json()["id"]
+
+        msg = await self._send_msg(client, token2, chat_id, "hello")
+        msg_id = msg.json()["id"]
+
+        resp = await client.delete(
+            f"/chats/{chat_id}/messages/{msg_id}",
+            headers={"Authorization": f"Bearer {token1}"},
+        )
+        assert resp.status_code == 204
+
+    @pytest.mark.asyncio
+    async def test_delete_non_existent_message(self, client: AsyncClient):
+        token1, _ = await self._register(client, "user_a")
+        _, user_b_id = await self._register(client, "user_b")
+
+        chat = await self._create_group(client, token1, [str(user_b_id)])
+        chat_id = chat.json()["id"]
+
+        fake_id = str(uuid.uuid4())
+        resp = await client.delete(
+            f"/chats/{chat_id}/messages/{fake_id}",
+            headers={"Authorization": f"Bearer {token1}"},
+        )
+        assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_delete_non_member(self, client: AsyncClient):
+        token1, _ = await self._register(client, "user_a")
+        _, user_b_id = await self._register(client, "user_b")
+        token3, _ = await self._register(client, "user_c")
+
+        chat = await self._create_group(client, token1, [str(user_b_id)])
+        chat_id = chat.json()["id"]
+
+        msg = await self._send_msg(client, token1, chat_id, "hello")
+        msg_id = msg.json()["id"]
+
+        resp = await client.delete(
+            f"/chats/{chat_id}/messages/{msg_id}",
+            headers={"Authorization": f"Bearer {token3}"},
+        )
+        assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_delete_message_publishes_kafka_event(self, client: AsyncClient):
+        token1, _ = await self._register(client, "user_a")
+        _, user_b_id = await self._register(client, "user_b")
+
+        chat = await self._create_group(client, token1, [str(user_b_id)])
+        chat_id = chat.json()["id"]
+
+        msg = await self._send_msg(client, token1, chat_id, "hello")
+        msg_id = msg.json()["id"]
+
+        with patch("app.chats.router.publish_event", new_callable=AsyncMock) as mock_publish:
+            resp = await client.delete(
+                f"/chats/{chat_id}/messages/{msg_id}",
+                headers={"Authorization": f"Bearer {token1}"},
+            )
+            assert resp.status_code == 204
+
+            mock_publish.assert_awaited_once()
+            args, kwargs = mock_publish.call_args
+            assert kwargs["topic"] == "message_events"
+            assert kwargs["key"] == str(chat_id)
+            payload = kwargs["payload"]
+            assert payload["type"] == "message_deleted"
+            assert payload["chat_id"] == str(chat_id)
+            assert payload["message_id"] == str(msg_id)

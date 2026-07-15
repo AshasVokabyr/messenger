@@ -29,6 +29,7 @@ class MessengerClient:
         self._chat_ids_by_login: dict[str, str] = {}
         self._ws_queue: asyncio.Queue = asyncio.Queue()
         self._subscribed_chats: set[str] = set()
+        self._last_messages: list[dict] = []
         self._stop = asyncio.Event()
         self._ws_task: asyncio.Task | None = None
 
@@ -81,7 +82,7 @@ class MessengerClient:
             return ["/help", "/register", "/login", "/quit", "/exit"]
         words = [
             "/help", "/chats", "/leave", "/enter", "/switch",
-            "/back", "/clear", "/kick", "/invite", "/delete", "/search",
+            "/back", "/clear", "/kick", "/invite", "/del_chat", "/del_message", "/role", "/search",
             "/personal", "/group", "/register", "/login", "/logout",
             "/users", "/messages", "/members", "/exit",
         ]
@@ -221,6 +222,17 @@ class MessengerClient:
                 return resp.json()
             raise RuntimeError(f"Add participant failed ({resp.status_code}): {resp.json().get('detail', '')}")
 
+    async def set_role(self, chat_id: str, user_id: str, role: str) -> dict:
+        async with httpx.AsyncClient() as c:
+            resp = await c.patch(
+                f"{self.base_url}/chats/{chat_id}/participants/{user_id}/role",
+                json={"role": role},
+                headers=await self._auth_header(),
+            )
+            if resp.status_code == 200:
+                return resp.json()
+            raise RuntimeError(f"Set role failed ({resp.status_code}): {resp.json().get('detail', '')}")
+
     async def delete_chat(self, chat_id: str) -> dict:
         async with httpx.AsyncClient() as c:
             resp = await c.delete(
@@ -262,6 +274,15 @@ class MessengerClient:
             if resp.status_code == 201:
                 return resp.json()
             raise RuntimeError(f"Failed to send message ({resp.status_code}): {resp.json().get('detail', '')}")
+
+    async def delete_message(self, chat_id: str, message_id: str) -> None:
+        async with httpx.AsyncClient() as c:
+            resp = await c.delete(
+                f"{self.base_url}/chats/{chat_id}/messages/{message_id}",
+                headers=await self._auth_header(),
+            )
+            if resp.status_code != 204:
+                raise RuntimeError(f"Delete message failed ({resp.status_code}): {resp.json().get('detail', '')}")
 
     async def get_messages(self, chat_id: str, limit: int = 50) -> list[dict]:
         async with httpx.AsyncClient() as c:
@@ -306,7 +327,14 @@ class MessengerClient:
                 sender = d.get("sender_login", "unknown")
                 is_me = sender == self.login_name
                 color = "ansigreen" if is_me else "ansiyellow"
-                self._print(f"[{ts}] <{color}>{sender}</{color}>: {html.escape(d['content'])}")
+                self._last_messages.append(d)
+                self._print(f"[{ts}] <{color}>{sender}</{color}>: {html.escape(d['content'])}  <i>({len(self._last_messages)})</i>")
+
+            elif t == "message_deleted":
+                d = data["data"]
+                mid = d["message_id"]
+                self._last_messages = [m for m in self._last_messages if m["id"] != mid]
+                self._print(f"<i>Message {mid[:8]} deleted</i>")
 
             elif t == "joined":
                 cid = data["chat_id"]
@@ -393,14 +421,17 @@ class MessengerClient:
         name = self._chat_display_name(chat_id)
         if not msgs:
             self._print(f"<i>No messages in {name}</i>")
+            self._last_messages = []
             return
         self._print(f"<i>--- History of {name} ({len(msgs)} messages) ---</i>")
-        for m in reversed(msgs):
+        self._last_messages = list(msgs)
+        for i, m in enumerate(reversed(msgs), 1):
             ts = datetime.fromisoformat(m["created_at"]).strftime("%H:%M:%S")
             sender = m.get("sender_login", "unknown")
             is_me = sender == self.login_name
             color = "ansigreen" if is_me else "ansiyellow"
-            self._print(f"  [{ts}] <{color}>{sender}</{color}>: {html.escape(m['content'])}")
+            idx = len(msgs) - i + 1
+            self._print(f"  [{ts}] <{color}>{sender}</{color}>: {html.escape(m['content'])}  <i>({idx})</i>")
 
 
 _HELP_AUTH = """
@@ -422,7 +453,8 @@ _HELP_FULL = """
   /invite <ref> <login>    Add participant to chat
   /kick <ref> <login>      Remove participant (admin only)
   /leave <ref>             Leave chat (remove yourself from participants)
-  /delete <ref>            Delete chat (admin only)
+  /del_chat <ref>          Delete chat (admin only)
+  /role <ref> <l> <r>      Set role (moderator|member) of participant (admin only)
 
 ── Navigation ──────────────────────────────
   /chats                   List your chats (numbered)
@@ -433,6 +465,7 @@ _HELP_FULL = """
 ── Messages ────────────────────────────────
   /messages [N]            Show last N messages in current chat
   /search <query>          Search messages across all your chats
+  /del_message <N>         Delete message N from last /messages output
   <any text>               Send message to current chat
 
 ── Info ────────────────────────────────────
@@ -615,9 +648,9 @@ async def interactive_mode(client: MessengerClient) -> None:
                     except Exception as e:
                         print_formatted_text(HTML(f"<ansired>Error: {e}</ansired>"))
 
-                elif cmd == "/delete":
+                elif cmd == "/del_chat":
                     if len(parts) < 2:
-                        print("Usage: /delete <ref>")
+                        print("Usage: /del_chat <ref>")
                         continue
                     cid = await client._resolve_ref(parts[1])
                     if not cid:
@@ -631,6 +664,25 @@ async def interactive_mode(client: MessengerClient) -> None:
                         client._chats_cache.pop(cid, None)
                         client._chat_list = [c for c in client._chat_list if c["id"] != cid]
                         print(result.get("detail", f"Deleted {client._chat_display_name(cid)}"))
+                    except Exception as e:
+                        print_formatted_text(HTML(f"<ansired>Error: {e}</ansired>"))
+
+                elif cmd == "/role":
+                    if len(parts) < 4:
+                        print("Usage: /role <ref> <login> <moderator|member>")
+                        continue
+                    cid = await client._resolve_ref(parts[1])
+                    if not cid:
+                        print_formatted_text(HTML(f"<ansired>Chat not found: {parts[1]}</ansired>"))
+                        continue
+                    role = parts[3].lower()
+                    if role not in ("moderator", "member"):
+                        print("Role must be 'moderator' or 'member'")
+                        continue
+                    try:
+                        user = await client.get_user_by_login(parts[2])
+                        await client.set_role(cid, str(user["id"]), role)
+                        print(f"Set {parts[2]} role to {role} in {client._chat_display_name(cid)}")
                     except Exception as e:
                         print_formatted_text(HTML(f"<ansired>Error: {e}</ansired>"))
 
@@ -751,6 +803,32 @@ async def interactive_mode(client: MessengerClient) -> None:
                     except Exception as e:
                         print_formatted_text(HTML(f"<ansired>Error: {e}</ansired>"))
 
+                elif cmd == "/del_message":
+                    if len(parts) < 2:
+                        print("Usage: /del_message <N>")
+                        continue
+                    if not client.current_chat_id:
+                        print("No current chat.")
+                        continue
+                    if not client._last_messages:
+                        print("No messages loaded. Use /messages first.")
+                        continue
+                    try:
+                        idx = int(parts[1])
+                    except ValueError:
+                        print("Usage: /del_message <N>  (N is the message number from /messages output)")
+                        continue
+                    if idx < 1 or idx > len(client._last_messages):
+                        print(f"Message number out of range (1-{len(client._last_messages)})")
+                        continue
+                    target = client._last_messages[idx - 1]
+                    try:
+                        await client.delete_message(client.current_chat_id, target["id"])
+                        client._last_messages.pop(idx - 1)
+                        print("Message deleted")
+                    except Exception as e:
+                        print_formatted_text(HTML(f"<ansired>Error: {e}</ansired>"))
+
                 elif cmd == "/members":
                     if not client.current_chat_id:
                         print("No current chat.")
@@ -759,7 +837,8 @@ async def interactive_mode(client: MessengerClient) -> None:
                         chat = await client.get_chat(client.current_chat_id)
                         for m in chat.get("members", []):
                             tag = " (you)" if m["login"] == client.login_name else ""
-                            print(f"  {m['login']}{tag}")
+                            role = m.get("role", "member")
+                            print(f"  {m['login']}{tag}  [{role}]")
                     except Exception as e:
                         print_formatted_text(HTML(f"<ansired>Error: {e}</ansired>"))
 

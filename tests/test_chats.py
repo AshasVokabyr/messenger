@@ -545,3 +545,128 @@ class TestDeleteChat:
     async def test_delete_chat_unauthorized(self, client: AsyncClient):
         resp = await client.delete(f"/chats/{uuid.uuid4()}")
         assert resp.status_code == 401
+
+
+class TestChangeRole:
+    async def _register(self, client: AsyncClient, login: str):
+        resp = await client.post(
+            "/auth/register",
+            json={"login": login, "password": "secret123"},
+        )
+        data = resp.json()
+        from app.auth.utils import decode_access_token
+        payload = decode_access_token(data["access_token"])
+        user_id = uuid.UUID(payload["sub"])
+        return data["access_token"], user_id
+
+    async def _create_group(self, client, token, participant_ids, name="Group"):
+        resp = await client.post(
+            "/chats/group",
+            json={"name": name, "participant_ids": participant_ids},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        return resp
+
+    @pytest.mark.asyncio
+    async def test_admin_promotes_member_to_moderator(self, client: AsyncClient):
+        token1, _ = await self._register(client, "user_a")
+        _, user_b_id = await self._register(client, "user_b")
+
+        chat = await self._create_group(client, token1, [str(user_b_id)])
+        chat_id = chat.json()["id"]
+
+        resp = await client.patch(
+            f"/chats/{chat_id}/participants/{user_b_id}/role",
+            json={"role": "moderator"},
+            headers={"Authorization": f"Bearer {token1}"},
+        )
+        assert resp.status_code == 200
+        members = resp.json()["members"]
+        target = next(m for m in members if m["id"] == str(user_b_id))
+        assert target["role"] == "moderator"
+
+    @pytest.mark.asyncio
+    async def test_admin_demotes_moderator_to_member(self, client: AsyncClient):
+        token1, user1_id = await self._register(client, "user_a")
+        _, user_b_id = await self._register(client, "user_b")
+
+        chat = await self._create_group(client, token1, [str(user_b_id)])
+        chat_id = chat.json()["id"]
+
+        await client.patch(
+            f"/chats/{chat_id}/participants/{user_b_id}/role",
+            json={"role": "moderator"},
+            headers={"Authorization": f"Bearer {token1}"},
+        )
+
+        resp = await client.patch(
+            f"/chats/{chat_id}/participants/{user_b_id}/role",
+            json={"role": "member"},
+            headers={"Authorization": f"Bearer {token1}"},
+        )
+        assert resp.status_code == 200
+        members = resp.json()["members"]
+        target = next(m for m in members if m["id"] == str(user_b_id))
+        assert target["role"] == "member"
+
+    @pytest.mark.asyncio
+    async def test_non_admin_cannot_change_role(self, client: AsyncClient):
+        token1, _ = await self._register(client, "user_a")
+        token2, user_b_id = await self._register(client, "user_b")
+        _, user_c_id = await self._register(client, "user_c")
+
+        chat = await self._create_group(client, token1, [str(user_b_id), str(user_c_id)])
+        chat_id = chat.json()["id"]
+
+        resp = await client.patch(
+            f"/chats/{chat_id}/participants/{user_c_id}/role",
+            json={"role": "moderator"},
+            headers={"Authorization": f"Bearer {token2}"},
+        )
+        assert resp.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_change_role_nonexistent_participant(self, client: AsyncClient):
+        token1, _ = await self._register(client, "user_a")
+        _, user_b_id = await self._register(client, "user_b")
+
+        chat = await self._create_group(client, token1, [str(user_b_id)])
+        chat_id = chat.json()["id"]
+        fake_id = str(uuid.uuid4())
+
+        resp = await client.patch(
+            f"/chats/{chat_id}/participants/{fake_id}/role",
+            json={"role": "moderator"},
+            headers={"Authorization": f"Bearer {token1}"},
+        )
+        assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_admin_cannot_change_admin_role(self, client: AsyncClient):
+        token1, _ = await self._register(client, "user_a")
+        _, user_b_id = await self._register(client, "user_b")
+
+        chat = await self._create_group(client, token1, [str(user_b_id)])
+        chat_id = chat.json()["id"]
+
+        resp = await client.patch(
+            f"/chats/{chat_id}/participants/{user_b_id}/role",
+            json={"role": "admin"},
+            headers={"Authorization": f"Bearer {token1}"},
+        )
+        assert resp.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_invalid_role_rejected(self, client: AsyncClient):
+        token1, _ = await self._register(client, "user_a")
+        _, user_b_id = await self._register(client, "user_b")
+
+        chat = await self._create_group(client, token1, [str(user_b_id)])
+        chat_id = chat.json()["id"]
+
+        resp = await client.patch(
+            f"/chats/{chat_id}/participants/{user_b_id}/role",
+            json={"role": "superadmin"},
+            headers={"Authorization": f"Bearer {token1}"},
+        )
+        assert resp.status_code == 422
