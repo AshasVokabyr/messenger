@@ -406,26 +406,23 @@ class TestLeaveChat:
         assert str(user1_id) not in member_ids
 
     @pytest.mark.asyncio
-    async def test_leave_last_participant_deletes_chat(self, client: AsyncClient):
+    async def test_leave_last_participant_deletes_group_chat(self, client: AsyncClient):
         token1, _ = await self._register(client, "user_a")
         token2, user_b_id = await self._register(client, "user_b")
 
-        resp = await client.post(
-            f"/chats/personal/{user_b_id}",
-            headers={"Authorization": f"Bearer {token1}"},
-        )
-        chat_id = resp.json()["id"]
+        chat = await self._create_group(client, token1, [str(user_b_id)])
+        chat_id = chat.json()["id"]
 
         resp = await client.post(
             f"/chats/{chat_id}/leave",
-            headers={"Authorization": f"Bearer {token1}"},
+            headers={"Authorization": f"Bearer {token2}"},
         )
         assert resp.status_code == 200
         assert resp.json()["detail"] == "Left the chat"
 
         resp = await client.post(
             f"/chats/{chat_id}/leave",
-            headers={"Authorization": f"Bearer {token2}"},
+            headers={"Authorization": f"Bearer {token1}"},
         )
         assert resp.status_code == 200
         assert "deleted" in resp.json()["detail"]
@@ -439,7 +436,7 @@ class TestLeaveChat:
     @pytest.mark.asyncio
     async def test_leave_personal_deletes_chat(self, client: AsyncClient):
         token1, _ = await self._register(client, "user_a")
-        token2, user_b_id = await self._register(client, "user_b")
+        _, user_b_id = await self._register(client, "user_b")
 
         resp = await client.post(
             f"/chats/personal/{user_b_id}",
@@ -450,13 +447,6 @@ class TestLeaveChat:
         resp = await client.post(
             f"/chats/{chat_id}/leave",
             headers={"Authorization": f"Bearer {token1}"},
-        )
-        assert resp.status_code == 200
-        assert resp.json()["detail"] == "Left the chat"
-
-        resp = await client.post(
-            f"/chats/{chat_id}/leave",
-            headers={"Authorization": f"Bearer {token2}"},
         )
         assert resp.status_code == 200
         assert "deleted" in resp.json()["detail"]

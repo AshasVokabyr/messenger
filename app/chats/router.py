@@ -501,15 +501,22 @@ async def leave_chat(
 
     remaining = [p for p in chat.participants if p.user_id != current_user.id]
 
-    if not remaining:
+    if chat.type == ChatType.personal or not remaining:
+        other = remaining[0] if remaining else None
         await db.delete(chat)
         await db.commit()
         manager.unsubscribe(current_user.id, chat_id)
+        if other:
+            manager.unsubscribe(other.user_id, chat_id)
+            await manager.send_to_user(other.user_id, {
+                "type": "chat_deleted",
+                "chat_id": str(chat_id),
+            })
         await publish_event("chat_events", str(chat_id), {
             "type": "chat_deleted",
             "chat_id": str(chat_id),
         })
-        return {"detail": "Chat deleted (last participant left)"}
+        return {"detail": "Chat deleted"}
 
     await db.delete(me)
     await db.commit()

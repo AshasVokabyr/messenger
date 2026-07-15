@@ -80,10 +80,10 @@ class MessengerClient:
         if not self.authenticated:
             return ["/help", "/register", "/login", "/quit", "/exit"]
         words = [
-            "/help", "/chats", "/join", "/leave", "/enter", "/switch",
-            "/back", "/clear",
+            "/help", "/chats", "/leave", "/enter", "/switch",
+            "/back", "/clear", "/kick", "/invite", "/delete", "/search",
             "/personal", "/group", "/register", "/login", "/logout",
-            "/users", "/messages", "/members", "/quit", "/exit",
+            "/users", "/messages", "/members", "/exit",
         ]
         words.extend(self._chat_ids_by_login.keys())
         for i in range(len(self._chat_list)):
@@ -201,6 +201,47 @@ class MessengerClient:
                 return chat
             raise RuntimeError(f"Failed to create group chat ({resp.status_code}): {resp.json().get('detail', '')}")
 
+    async def remove_participant(self, chat_id: str, user_id: str) -> None:
+        async with httpx.AsyncClient() as c:
+            resp = await c.delete(
+                f"{self.base_url}/chats/{chat_id}/participants/{user_id}",
+                headers=await self._auth_header(),
+            )
+            if resp.status_code != 204:
+                raise RuntimeError(f"Remove failed ({resp.status_code}): {resp.json().get('detail', '')}")
+
+    async def add_participant(self, chat_id: str, user_id: str) -> dict:
+        async with httpx.AsyncClient() as c:
+            resp = await c.post(
+                f"{self.base_url}/chats/{chat_id}/participants",
+                json={"user_ids": [user_id]},
+                headers=await self._auth_header(),
+            )
+            if resp.status_code == 200:
+                return resp.json()
+            raise RuntimeError(f"Add participant failed ({resp.status_code}): {resp.json().get('detail', '')}")
+
+    async def delete_chat(self, chat_id: str) -> dict:
+        async with httpx.AsyncClient() as c:
+            resp = await c.delete(
+                f"{self.base_url}/chats/{chat_id}",
+                headers=await self._auth_header(),
+            )
+            if resp.status_code == 200:
+                return resp.json()
+            raise RuntimeError(f"Delete failed ({resp.status_code}): {resp.json().get('detail', '')}")
+
+    async def search_messages_global(self, q: str) -> list[dict]:
+        async with httpx.AsyncClient() as c:
+            resp = await c.get(
+                f"{self.base_url}/messages/search",
+                params={"q": q},
+                headers=await self._auth_header(),
+            )
+            if resp.status_code == 200:
+                return resp.json()
+            raise RuntimeError(f"Search messages failed ({resp.status_code}): {resp.json().get('detail', '')}")
+
     async def leave_chat(self, chat_id: str) -> dict:
         async with httpx.AsyncClient() as c:
             resp = await c.post(
@@ -278,6 +319,15 @@ class MessengerClient:
                 self._subscribed_chats.discard(cid)
                 name = self._chat_display_name(cid)
                 self._print(f"<i>Left {name}</i>")
+
+            elif t == "chat_deleted":
+                cid = data["chat_id"]
+                self._chats_cache.pop(cid, None)
+                self._chat_list = [c for c in self._chat_list if c["id"] != cid]
+                self._subscribed_chats.discard(cid)
+                if self.current_chat_id == cid:
+                    self.current_chat_id = None
+                self._print(f"<i>Chat deleted</i>")
 
             elif t == "ping":
                 pass
@@ -357,29 +407,39 @@ _HELP_AUTH = """
   /register <login> <pwd>  Register a new user and log in
   /login <login> <pwd>     Log in as existing user
   /help                    Show this help
-  /quit                    Exit the program
   /exit                    Exit the program"""
 
 _HELP_FULL = """
-  /help                    Show this help
-  /chats                   List your chats (numbered)
-  /join <ref>              Subscribe to chat + set as current
-  /leave <ref>             Leave chat (remove yourself from participants)
-  /enter <ref> [N]         Join + show last N messages
-  /switch [ref]            Switch current chat (list if no ref)
-  /back                    Go to main menu (keep subscriptions)
-  /clear                   Clear terminal screen
-  /personal <login>        Create personal chat by login
-  /group <name> <login1>...   Create group chat
+── Authentication ──────────────────────────
   /register <l> <p>        Register a new user
   /login <l> <p>           Log in as existing user
   /logout                  Log out and return to anonymous mode
-  /users <query>           Search users by login
-  /messages [N]            Show last N messages in current chat
-  /members                 Show members of current chat
-  /quit                    Exit the program
   /exit                    Exit the program
+
+── Chat Management ─────────────────────────
+  /personal <login>        Create personal chat by login
+  /group <name> <l1>...    Create group chat
+  /invite <ref> <login>    Add participant to chat
+  /kick <ref> <login>      Remove participant (admin only)
+  /leave <ref>             Leave chat (remove yourself from participants)
+  /delete <ref>            Delete chat (admin only)
+
+── Navigation ──────────────────────────────
+  /chats                   List your chats (numbered)
+  /enter <ref> [N]         Enter chat + show last N messages
+  /switch [ref]            Switch current chat (list if no ref)
+  /back                    Go to main menu (keep subscriptions)
+
+── Messages ────────────────────────────────
+  /messages [N]            Show last N messages in current chat
+  /search <query>          Search messages across all your chats
   <any text>               Send message to current chat
+
+── Info ────────────────────────────────────
+  /help                    Show this help
+  /users <query>           Search users by login
+  /members                 Show members of current chat
+  /clear                   Clear terminal screen
 
 Ref can be: number from /chats, login (for personal chats),
             or chat_id (UUID)."""
@@ -389,10 +449,10 @@ async def _reload(client: MessengerClient) -> None:
     try:
         chats = await client.get_chats()
         if chats:
-            print("Your chats:")
+            client._print("<b>Your chats:</b>")
             client.print_chat_list(chats)
         else:
-            print("  No chats yet")
+            client._print("<i>No chats yet</i>")
     except Exception:
         pass
 
@@ -444,8 +504,8 @@ async def interactive_mode(client: MessengerClient) -> None:
                         client.login_name = parts[1]
                         if not was_auth:
                             await client.start_ws()
-                        await _reload(client)
                         print_formatted_text(HTML(f"Registered and logged in as <ansigreen>{parts[1]}</ansigreen>"))
+                        await _reload(client)
                     except Exception as e:
                         print_formatted_text(HTML(f"<ansired>Error: {e}</ansired>"))
 
@@ -459,8 +519,8 @@ async def interactive_mode(client: MessengerClient) -> None:
                         client.login_name = parts[1]
                         if not was_auth:
                             await client.start_ws()
-                        await _reload(client)
                         print_formatted_text(HTML(f"Logged in as <ansigreen>{parts[1]}</ansigreen>"))
+                        await _reload(client)
                     except Exception as e:
                         print_formatted_text(HTML(f"<ansired>Error: {e}</ansired>"))
 
@@ -487,9 +547,10 @@ async def interactive_mode(client: MessengerClient) -> None:
                     try:
                         chats = await client.get_chats()
                         if chats:
+                            client._print("<b>Your chats:</b>")
                             client.print_chat_list(chats)
                         else:
-                            print("  No chats")
+                            client._print("<i>No chats</i>")
                     except Exception as e:
                         print_formatted_text(HTML(f"<ansired>Error: {e}</ansired>"))
 
@@ -503,18 +564,35 @@ async def interactive_mode(client: MessengerClient) -> None:
                 elif cmd == "/clear":
                     print("\033[2J\033[H", end="")
 
-                elif cmd == "/join":
-                    if len(parts) < 2:
-                        print("Usage: /join <ref>")
+                elif cmd == "/kick":
+                    if len(parts) < 3:
+                        print("Usage: /kick <ref> <login>")
                         continue
                     cid = await client._resolve_ref(parts[1])
                     if not cid:
                         print_formatted_text(HTML(f"<ansired>Chat not found: {parts[1]}</ansired>"))
                         continue
-                    client.current_chat_id = cid
-                    await client.ws_send({"action": "join", "chat_id": cid})
-                    name = client._chat_display_name(cid)
-                    print(f"Joined {name}")
+                    try:
+                        user = await client.get_user_by_login(parts[2])
+                        await client.remove_participant(cid, str(user["id"]))
+                        print(f"Removed {parts[2]} from {client._chat_display_name(cid)}")
+                    except Exception as e:
+                        print_formatted_text(HTML(f"<ansired>Error: {e}</ansired>"))
+
+                elif cmd == "/invite":
+                    if len(parts) < 3:
+                        print("Usage: /invite <ref> <login>")
+                        continue
+                    cid = await client._resolve_ref(parts[1])
+                    if not cid:
+                        print_formatted_text(HTML(f"<ansired>Chat not found: {parts[1]}</ansired>"))
+                        continue
+                    try:
+                        user = await client.get_user_by_login(parts[2])
+                        await client.add_participant(cid, str(user["id"]))
+                        print(f"Added {parts[2]} to {client._chat_display_name(cid)}")
+                    except Exception as e:
+                        print_formatted_text(HTML(f"<ansired>Error: {e}</ansired>"))
 
                 elif cmd == "/leave":
                     if len(parts) < 2:
@@ -531,7 +609,28 @@ async def interactive_mode(client: MessengerClient) -> None:
                         client._subscribed_chats.discard(cid)
                         client._chats_cache.pop(cid, None)
                         client._chat_list = [c for c in client._chat_list if c["id"] != cid]
+                        if client.current_chat_id == cid:
+                            client.current_chat_id = None
                         print(result.get("detail", f"Left {client._chat_display_name(cid)}"))
+                    except Exception as e:
+                        print_formatted_text(HTML(f"<ansired>Error: {e}</ansired>"))
+
+                elif cmd == "/delete":
+                    if len(parts) < 2:
+                        print("Usage: /delete <ref>")
+                        continue
+                    cid = await client._resolve_ref(parts[1])
+                    if not cid:
+                        print_formatted_text(HTML(f"<ansired>Chat not found: {parts[1]}</ansired>"))
+                        continue
+                    if client.current_chat_id == cid:
+                        client.current_chat_id = None
+                    try:
+                        result = await client.delete_chat(cid)
+                        client._subscribed_chats.discard(cid)
+                        client._chats_cache.pop(cid, None)
+                        client._chat_list = [c for c in client._chat_list if c["id"] != cid]
+                        print(result.get("detail", f"Deleted {client._chat_display_name(cid)}"))
                     except Exception as e:
                         print_formatted_text(HTML(f"<ansired>Error: {e}</ansired>"))
 
@@ -570,7 +669,7 @@ async def interactive_mode(client: MessengerClient) -> None:
                             await client.get_chats()
                         subscribed = [c for c in client._chat_list if c["id"] in client._subscribed_chats]
                         if not subscribed:
-                            print("No subscribed chats. Use /join or /enter first.")
+                            print("No subscribed chats. Use /enter first.")
                         else:
                             print("Subscribed chats:")
                             for i, c in enumerate(subscribed, 1):
@@ -644,7 +743,7 @@ async def interactive_mode(client: MessengerClient) -> None:
                             print("Usage: /messages [N]")
                             continue
                     if not client.current_chat_id:
-                        print("No current chat. Use /join, /enter, or /switch first.")
+                        print("No current chat. Use /enter or /switch first.")
                         continue
                     try:
                         msgs = await client.get_messages(client.current_chat_id, limit)
@@ -664,6 +763,23 @@ async def interactive_mode(client: MessengerClient) -> None:
                     except Exception as e:
                         print_formatted_text(HTML(f"<ansired>Error: {e}</ansired>"))
 
+                elif cmd == "/search":
+                    if len(parts) < 2:
+                        print("Usage: /search <query>")
+                        continue
+                    try:
+                        results = await client.search_messages_global(parts[1])
+                        if not results:
+                            print("No results found")
+                        else:
+                            print(f"Search results ({len(results)}):")
+                            for m in results:
+                                ts = datetime.fromisoformat(m["created_at"]).strftime("%H:%M:%S")
+                                sender = m.get("sender_login", "unknown")
+                                print(f"  [{ts}] {sender}: {m['content']}")
+                    except Exception as e:
+                        print_formatted_text(HTML(f"<ansired>Error: {e}</ansired>"))
+
                 elif cmd.startswith("/"):
                     print(f"Unknown command: {cmd}")
 
@@ -673,7 +789,7 @@ async def interactive_mode(client: MessengerClient) -> None:
                     except Exception as e:
                         print_formatted_text(HTML(f"<ansired>Error: {e}</ansired>"))
                 else:
-                    print("No current chat. Use /join, /enter, or /switch first.")
+                    print("No current chat. Use /enter or /switch first.")
     finally:
         if client.authenticated:
             await client.stop_ws()
