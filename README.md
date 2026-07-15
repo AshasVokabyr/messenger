@@ -26,6 +26,10 @@
 **Поток сообщения в реальном времени:**
 `Клиент A (REST)` → `FastAPI` → `PostgreSQL (сохранение)` + `Kafka (публикация)` → `Kafka Consumer` → `WebSocket Manager` → `Клиент B (WS)`
 
+**Надёжность Kafka:**
+- **Producer:** retry 1/2/4 секунды при ошибке отправки, после 3 неудач — CRITICAL лог (не блокирует ответ клиенту)
+- **Consumer:** exponential backoff при потере связи (1→30s, max 10 retries)
+
 ## Быстрый старт
 
 ### 1. Запуск инфраструктуры
@@ -64,17 +68,19 @@ python client.py interactive
 
 ```
 > /register alice secret123    # регистрация
-> /register bob secret123
-> /login alice                  # войти как alice
-> /personal bob                 # создать личный чат с bob
-> /enter bob                    # войти в чат + показать историю
-> Привет, Боб!                  # отправить сообщение
-> /back                         # выйти из чата в меню
-> /chats                        # список чатов
-> /group group1 bob alice       # создать групповой чат
-> /enter group1                 # войти в групповой чат
-> /leave group1                 # отписаться от чата
-> /help                         # все команды
+> /personal bob                # создать личный чат с bob
+> /enter bob                   # войти в чат + показать историю
+> Привет, Боб!                 # отправить сообщение
+> /back                        # выйти из чата в меню
+> /chats                       # список чатов
+> /group group1 bob alice      # создать групповой чат
+> /enter group1                # войти в групповой чат
+> /invite group1 eve           # добавить участника
+> /messages 10                 # показать последние 10 сообщений
+> /search привет               # глобальный поиск
+> /leave group1                # покинуть групповой чат
+> /delete group1               # удалить чат (только админ)
+> /help                        # все команды
 ```
 
 ### 5. Работа через curl
@@ -163,8 +169,8 @@ messenger/
 │   ├── chats/               # Модуль управления чатами
 │   │   ├── router.py        # Эндпоинты CRUD чатов и участников
 │   │   └── schemas.py       # Pydantic схемы для чатов
-│   ├── messages/            # Модуль сообщений
-│   │   ├── router.py        # Эндпоинты отправки, истории и поиска
+│   ├── messages/            # Глобальный поиск сообщений
+│   │   ├── router.py        # Эндпоинт /messages/search
 │   │   └── schemas.py       # Pydantic схемы для сообщений
 │   ├── users/               # Модуль поиска пользователей
 │   │   ├── router.py        # Эндпоинты /users/by-login, /users/search
@@ -206,12 +212,27 @@ messenger/
 | POST | `/chats/group` | Создать групповой чат |
 | POST | `/chats/{chat_id}/participants` | Добавить участников (админ) |
 | DELETE | `/chats/{chat_id}/participants/{user_id}` | Удалить участника (админ) |
+| POST | `/chats/{chat_id}/leave` | Выйти из чата |
+| DELETE | `/chats/{chat_id}` | Удалить чат (админ) |
 | POST | `/chats/{chat_id}/messages` | Отправить сообщение |
 | GET | `/chats/{chat_id}/messages` | История сообщений (пагинация) |
 | GET | `/chats/{chat_id}/messages/search?q=` | Поиск по сообщениям в чате |
 | GET | `/messages/search?q=` | Глобальный поиск по сообщениям |
 | WS | `/ws?token=` | WebSocket для real-time |
 | GET | `/health` | Health check |
+
+## Переменные окружения
+
+Копия `.env.example` → `.env`:
+
+| Переменная | По умолчанию | Описание |
+|---|---|---|
+| `DATABASE_URL` | `postgresql+asyncpg://...` | Подключение к PostgreSQL |
+| `KAFKA_BOOTSTRAP_SERVERS` | `localhost:9092` | Адрес Kafka (KRaft) |
+| `JWT_SECRET_KEY` | `secret` | Ключ подписи JWT |
+| `JWT_ALGORITHM` | `HS256` | Алгоритм JWT |
+| `JWT_EXPIRATION_MINUTES` | `60` | Время жизни токена |
+| `BCRYPT_ROUNDS` | `12` | Итерации хэширования паролей |
 
 ## Тестирование
 
@@ -223,24 +244,37 @@ pytest
 
 ## Команды CLI-клиента
 
-| Команда | Описание |
-|---------|----------|
-| `/register <l> <p>` | Регистрация и вход |
-| `/login <l> <p>` | Вход в существующий аккаунт |
-| `/logout` | Выход из аккаунта |
-| `/chats` | Список чатов |
-| `/join <ref>` | Подписаться на чат |
-| `/leave <ref>` | Отписаться от чата |
-| `/enter <ref> [N]` | Войти в чат + показать N сообщений |
-| `/switch [ref]` | Переключиться между чатами |
-| `/back` | Выйти из чата в меню |
-| `/personal <login>` | Создать личный чат по логину |
-| `/group <name> <logins>` | Создать групповой чат |
-| `/users <query>` | Поиск пользователей |
-| `/messages [N]` | Показать последние N сообщений |
-| `/members` | Участники текущего чата |
-| `/clear` | Очистить экран |
-| `/help` | Справка |
-| `/quit` / `/exit` | Выход |
+```
+── Authentication ──────────────────────────
+  /register <l> <p>        Register a new user
+  /login <l> <p>           Log in as existing user
+  /logout                  Log out and return to anonymous mode
+  /exit                    Exit the program
 
-`<ref>` может быть: номер из `/chats`, логин (для личных чатов), имя группового чата, или UUID.
+── Chat Management ─────────────────────────
+  /personal <login>        Create personal chat by login
+  /group <name> <l1>...    Create group chat
+  /invite <ref> <login>    Add participant to chat
+  /kick <ref> <login>      Remove participant (admin only)
+  /leave <ref>             Leave chat (remove yourself from participants)
+  /delete <ref>            Delete chat (admin only)
+
+── Navigation ──────────────────────────────
+  /chats                   List your chats (numbered)
+  /enter <ref> [N]         Enter chat + show last N messages
+  /switch [ref]            Switch current chat (list if no ref)
+  /back                    Go to main menu (keep subscriptions)
+
+── Messages ────────────────────────────────
+  /messages [N]            Show last N messages in current chat
+  /search <query>          Search messages across all your chats
+  <any text>               Send message to current chat
+
+── Info ────────────────────────────────────
+  /help                    Show this help
+  /users <query>           Search users by login
+  /members                 Show members of current chat
+  /clear                   Clear terminal screen
+```
+
+`<ref>` может быть: номер из `/chats`, логин (для личных чатов), имя чата или UUID.
