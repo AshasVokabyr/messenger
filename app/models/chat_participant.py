@@ -12,6 +12,7 @@ import enum
 
 class ParticipantRole(str, enum.Enum):
     admin = "admin"
+    moderator = "moderator"
     member = "member"
 
 
