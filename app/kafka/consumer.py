@@ -13,7 +13,9 @@ logger = logging.getLogger(__name__)
 _consumer: AIOKafkaConsumer | None = None
 _consumer_task: asyncio.Task | None = None
 
-RETRY_DELAY = 5
+MAX_RETRIES = 10
+BASE_DELAY = 1
+MAX_DELAY = 30
 
 
 async def start_consumer() -> None:
@@ -42,18 +44,34 @@ async def _dispatch(topic: str, payload: dict) -> None:
 
 
 async def _consume_loop() -> None:
+    retries = 0
     while True:
         try:
             async for msg in _consumer:
+                retries = 0
                 await _dispatch(msg.topic, msg.value)
+            raise KafkaConnectionError("Consumer stream ended")
         except asyncio.CancelledError:
             logger.info("Consumer loop cancelled")
             break
         except KafkaConnectionError:
-            logger.warning("Kafka connection lost, retrying in %ss...", RETRY_DELAY)
+            retries += 1
+            if retries > MAX_RETRIES:
+                logger.critical("Max retries (%d) exceeded, stopping consumer", MAX_RETRIES)
+                break
+            delay = min(BASE_DELAY * (2 ** (retries - 1)), MAX_DELAY)
+            logger.warning(
+                "Kafka connection lost (attempt %d/%d), retrying in %ds...",
+                retries, MAX_RETRIES, delay,
+            )
         except Exception:
             logger.exception("Consumer loop error")
-        await asyncio.sleep(RETRY_DELAY)
+            retries += 1
+            if retries > MAX_RETRIES:
+                logger.critical("Max retries (%d) exceeded, stopping consumer", MAX_RETRIES)
+                break
+            delay = min(BASE_DELAY * (2 ** (retries - 1)), MAX_DELAY)
+        await asyncio.sleep(delay)
 
 
 async def stop_consumer() -> None:
