@@ -1,6 +1,9 @@
+import logging
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+
+logger = logging.getLogger(__name__)
 from sqlalchemy import exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -11,6 +14,7 @@ from app.chats.schemas import (
     ChatCreateGroupRequest,
     ChatMemberResponse,
     ChatResponse,
+    RoleChangeRequest,
 )
 from app.db import get_db
 from app.kafka.producer import publish_event
@@ -36,7 +40,7 @@ async def _build_chat_response(chat_id: uuid.UUID, db: AsyncSession) -> ChatResp
         type=chat.type.value,
         created_at=chat.created_at,
         members=[
-            ChatMemberResponse(id=p.user.id, login=p.user.login)
+            ChatMemberResponse(id=p.user.id, login=p.user.login, role=p.role.value)
             for p in chat.participants
         ],
     )
@@ -178,7 +182,7 @@ async def list_chats(
             type=chat.type.value,
             created_at=chat.created_at,
             members=[
-                ChatMemberResponse(id=p.user.id, login=p.user.login)
+                ChatMemberResponse(id=p.user.id, login=p.user.login, role=p.role.value)
                 for p in chat.participants
             ],
         )
@@ -209,7 +213,7 @@ async def get_chat(
         type=chat.type.value,
         created_at=chat.created_at,
         members=[
-            ChatMemberResponse(id=p.user.id, login=p.user.login)
+            ChatMemberResponse(id=p.user.id, login=p.user.login, role=p.role.value)
             for p in chat.participants
         ],
     )
@@ -333,6 +337,60 @@ async def remove_participant(
     )
 
     return None
+
+
+@router.patch("/{chat_id}/participants/{user_id}/role", response_model=ChatResponse)
+async def change_participant_role(
+    chat_id: uuid.UUID,
+    user_id: uuid.UUID,
+    body: RoleChangeRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    try:
+        chat = await _require_admin(chat_id, current_user.id, db)
+
+        target = next(
+            (p for p in chat.participants if p.user_id == user_id), None
+        )
+        if target is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User is not a participant of this chat",
+            )
+
+        if target.role == ParticipantRole.admin:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot change role of an admin",
+            )
+
+        target.role = ParticipantRole(body.role)
+        await db.commit()
+
+        try:
+            await publish_event(
+                topic="chat_events",
+                key=str(chat_id),
+                payload={
+                    "type": "participant_role_changed",
+                    "chat_id": str(chat_id),
+                    "user_id": str(user_id),
+                    "role": body.role,
+                },
+            )
+        except Exception:
+            logger.exception("Failed to publish role change event")
+
+        return await _build_chat_response(chat_id, db)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Unexpected error in change_participant_role")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(exc),
+        )
 
 
 @router.post("/{chat_id}/messages", response_model=MessageResponse, status_code=status.HTTP_201_CREATED)
