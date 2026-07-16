@@ -1,6 +1,9 @@
+import logging
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+
+logger = logging.getLogger(__name__)
 from sqlalchemy import exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -21,6 +24,13 @@ from app.models.chat_participant import ChatParticipant, ParticipantRole
 from app.models.message import Message
 from app.models.user import User
 from app.websocket.manager import manager
+
+async def _safe_publish(topic: str, key: str, payload: dict) -> None:
+    try:
+        await publish_event(topic=topic, key=key, payload=payload)
+    except Exception:
+        logger.exception("Failed to publish event topic=%s key=%s", topic, key)
+
 
 router = APIRouter(prefix="/chats", tags=["chats"])
 
@@ -96,7 +106,7 @@ async def create_personal_chat(
 
     await db.commit()
 
-    await publish_event(
+    await _safe_publish(
         topic="chat_events",
         key=str(chat.id),
         payload={
@@ -141,7 +151,7 @@ async def create_group_chat(
 
     await db.commit()
 
-    await publish_event(
+    await _safe_publish(
         topic="chat_events",
         key=str(chat.id),
         payload={
@@ -279,8 +289,7 @@ async def add_participants(
 
     await db.commit()
     db.expire(chat)
-
-    await publish_event(
+    await _safe_publish(
         topic="chat_events",
         key=str(chat_id),
         payload={
@@ -324,7 +333,13 @@ async def remove_participant(
     await db.delete(target)
     await db.commit()
 
-    await publish_event(
+    await manager.send_to_user(
+        user_id,
+        {"type": "participant_removed", "data": {"chat_id": str(chat_id)}},
+    )
+    manager.unsubscribe(user_id, chat_id)
+
+    await _safe_publish(
         topic="chat_events",
         key=str(chat_id),
         payload={
@@ -366,7 +381,7 @@ async def change_participant_role(
     await db.commit()
     db.expire(chat)
 
-    await publish_event(
+    await _safe_publish(
         topic="chat_events",
         key=str(chat_id),
         payload={
@@ -404,7 +419,7 @@ async def send_chat_message(
     await db.commit()
     await db.refresh(message)
 
-    await publish_event(
+    await _safe_publish(
         topic="message_events",
         key=str(chat_id),
         payload={
@@ -568,7 +583,7 @@ async def delete_chat_message(
     await db.delete(msg)
     await db.commit()
 
-    await publish_event(
+    await _safe_publish(
         topic="message_events",
         key=str(chat_id),
         payload={
@@ -611,7 +626,7 @@ async def leave_chat(
                 "type": "chat_deleted",
                 "chat_id": str(chat_id),
             })
-        await publish_event("chat_events", str(chat_id), {
+        await _safe_publish("chat_events", str(chat_id), {
             "type": "chat_deleted",
             "chat_id": str(chat_id),
         })
@@ -620,7 +635,7 @@ async def leave_chat(
     await db.delete(me)
     await db.commit()
     manager.unsubscribe(current_user.id, chat_id)
-    await publish_event("chat_events", str(chat_id), {
+    await _safe_publish("chat_events", str(chat_id), {
         "type": "participant_left",
         "chat_id": str(chat_id),
         "user_id": str(current_user.id),
@@ -652,7 +667,7 @@ async def delete_chat(
 
     await db.delete(chat)
     await db.commit()
-    await publish_event("chat_events", str(chat_id), {
+    await _safe_publish("chat_events", str(chat_id), {
         "type": "chat_deleted",
         "chat_id": str(chat_id),
     })
