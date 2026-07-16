@@ -246,13 +246,18 @@ class MessengerClient:
     async def search_messages_global(self, q: str) -> list[dict]:
         async with httpx.AsyncClient() as c:
             resp = await c.get(
-                f"{self.base_url}/messages/search",
+                f"{self.base_url}/messages/search/",
                 params={"q": q},
                 headers=await self._auth_header(),
             )
             if resp.status_code == 200:
                 return resp.json()
-            raise RuntimeError(f"Search messages failed ({resp.status_code}): {resp.json().get('detail', '')}")
+            detail = ""
+            try:
+                detail = resp.json().get("detail", "")
+            except Exception:
+                pass
+            raise RuntimeError(f"Search messages failed ({resp.status_code}): {detail}")
 
     async def leave_chat(self, chat_id: str) -> dict:
         async with httpx.AsyncClient() as c:
@@ -356,6 +361,15 @@ class MessengerClient:
                 if self.current_chat_id == cid:
                     self.current_chat_id = None
                 self._print(f"<i>Chat deleted</i>")
+
+            elif t == "participant_removed":
+                cid = data["data"]["chat_id"]
+                self._chats_cache.pop(cid, None)
+                self._chat_list = [c for c in self._chat_list if c["id"] != cid]
+                self._subscribed_chats.discard(cid)
+                if self.current_chat_id == cid:
+                    self.current_chat_id = None
+                self._print("<i>You were removed from the chat</i>")
 
             elif t == "ping":
                 pass
