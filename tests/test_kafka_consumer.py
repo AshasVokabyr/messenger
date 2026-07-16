@@ -17,6 +17,7 @@ class MockConsumer:
         self._items = items
         self._exc_stop = exc_stop
         self._idx = 0
+        self.started = True
 
     def __aiter__(self):
         return self
@@ -29,6 +30,12 @@ class MockConsumer:
         item = self._items[self._idx]
         self._idx += 1
         return item
+
+    async def start(self):
+        self.started = True
+
+    async def stop(self):
+        self.started = False
 
 
 class TestDispatch:
@@ -66,9 +73,11 @@ class TestConsumeLoop:
 
         with (
             patch("app.kafka.consumer._consumer", consumer),
+            patch("app.kafka.consumer._create_consumer") as create_mock,
             patch("app.kafka.consumer._dispatch", new_callable=AsyncMock) as dispatch_mock,
             patch("app.kafka.consumer.BASE_DELAY", 0.05),
         ):
+            create_mock.return_value = MockConsumer([])
             task = asyncio.create_task(_consume_loop())
             await asyncio.sleep(0.05)
             task.cancel()
@@ -89,9 +98,11 @@ class TestConsumeLoop:
 
         with (
             patch("app.kafka.consumer._consumer", consumer),
+            patch("app.kafka.consumer._create_consumer") as create_mock,
             patch("app.kafka.consumer.BASE_DELAY", 0.001),
             patch("app.kafka.consumer.MAX_RETRIES", 3),
         ):
+            create_mock.return_value = MockConsumer([])
             result = await _consume_loop()
 
         assert result is None
@@ -105,10 +116,12 @@ class TestConsumeLoop:
 
         with (
             patch("app.kafka.consumer._consumer", consumer),
+            patch("app.kafka.consumer._create_consumer") as create_mock,
             patch("app.kafka.consumer.BASE_DELAY", 0.001),
             patch("app.kafka.consumer.MAX_RETRIES", 3),
             patch("app.kafka.consumer._dispatch", new_callable=AsyncMock),
         ):
+            create_mock.return_value = MockConsumer([], exc_stop=KafkaConnectionError("err"))
             task = asyncio.create_task(_consume_loop())
             await asyncio.sleep(0.05)
             task.cancel()
@@ -135,12 +148,10 @@ class TestStartConsumer:
         from app.kafka.consumer import start_consumer, _consumer
 
         with (
-            patch("app.kafka.consumer.AIOKafkaConsumer") as consumer_cls,
+            patch("app.kafka.consumer._create_consumer") as create_mock,
             patch("app.kafka.consumer.logger") as mock_logger,
         ):
-            consumer_instance = AsyncMock()
-            consumer_instance.start.side_effect = KafkaConnectionError("no kafka")
-            consumer_cls.return_value = consumer_instance
+            create_mock.side_effect = KafkaConnectionError("no kafka")
 
             await start_consumer()
 
